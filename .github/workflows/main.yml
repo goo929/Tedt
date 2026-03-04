@@ -27,7 +27,7 @@ jobs:
           Restart-Service -Name TermService -Force
 
       #################################################################
-      # 2️⃣ Create RDP User with Secure Password
+      # 2️⃣ Create RDP User with Secure Password (safe)
       #################################################################
       - name: Create RDP User with Secure Password
         run: |
@@ -46,7 +46,7 @@ jobs:
           $password = -join ($rawPassword | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # Safe check if user exists
+          # ✅ Corrected: use -ErrorAction SilentlyContinue to avoid exit if user doesn't exist
           $user = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
           if (-not $user) {
               New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
@@ -109,7 +109,6 @@ jobs:
         run: |
           rclone config create gdrive drive token "${{ secrets.GDRIVE_TOKEN }}"
 
-          # Check if backup exists
           $backupExists = rclone lsf gdrive:rdp-backups --max-depth 1 | Where-Object { $_ -eq "state.zip" }
 
           if ($backupExists) {

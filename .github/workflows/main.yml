@@ -21,13 +21,15 @@ jobs:
                              -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
                              -Name "SecurityLayer" -Value 0 -Force
+
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           netsh advfirewall firewall add rule name="RDP-Tailscale" `
             dir=in action=allow protocol=TCP localport=3389
+
           Restart-Service -Name TermService -Force
 
       #################################################################
-      # 2️⃣ Create RDP User with Secure Password (safe)
+      # 2️⃣ Create RDP User (safe)
       #################################################################
       - name: Create RDP User with Secure Password
         run: |
@@ -46,7 +48,7 @@ jobs:
           $password = -join ($rawPassword | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # ✅ Corrected: use -ErrorAction SilentlyContinue to avoid exit if user doesn't exist
+          # ✅ Safe check: don't error if user doesn't exist
           $user = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
           if (-not $user) {
               New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
@@ -68,7 +70,7 @@ jobs:
           Remove-Item $installerPath -Force
 
       #################################################################
-      # 4️⃣ Establish Tailscale Connection (fixed hostname)
+      # 4️⃣ Establish Tailscale Connection
       #################################################################
       - name: Establish Tailscale Connection
         run: |
@@ -110,7 +112,6 @@ jobs:
           rclone config create gdrive drive token "${{ secrets.GDRIVE_TOKEN }}"
 
           $backupExists = rclone lsf gdrive:rdp-backups --max-depth 1 | Where-Object { $_ -eq "state.zip" }
-
           if ($backupExists) {
               Write-Host "Backup found. Restoring previous session..."
               if (-not (Test-Path "C:\restore")) { New-Item -Path "C:\restore" -ItemType Directory }
@@ -118,7 +119,7 @@ jobs:
               Expand-Archive C:\restore\state.zip C:\Users\ -Force
               Write-Host "Previous session restored."
           } else {
-              Write-Host "No backup found. This is the first RDP run. Skipping restore."
+              Write-Host "No backup found. First RDP run."
           }
 
       #################################################################
@@ -129,7 +130,7 @@ jobs:
           $start = Get-Date
           while ($true) {
               $elapsed = (Get-Date) - $start
-              if ($elapsed.TotalMinutes -ge 330) {   # 5h30m
+              if ($elapsed.TotalMinutes -ge 330) {
                   Write-Host "Backing up files..."
                   if (-not (Test-Path "C:\Users\RDP")) { New-Item -Path "C:\Users\RDP" -ItemType Directory }
                   Compress-Archive -Path "C:\Users\RDP" -DestinationPath "C:\backup.zip" -Force
@@ -142,7 +143,6 @@ jobs:
                                     -Method POST `
                                     -Headers @{Authorization = "token $token"; Accept = "application/vnd.github+json"} `
                                     -Body '{"ref":"main"}'
-
                   Write-Host "Next RDP triggered. Old RDP will terminate soon."
                   break
               }
@@ -150,12 +150,17 @@ jobs:
           }
 
       #################################################################
-      # 9️⃣ Show RDP Credentials
+      # 9️⃣ Show RDP Credentials & maintain connection
       #################################################################
-      - name: Show RDP Credentials
+      - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: rdp-node.tailnet.ts.net"
           Write-Host "Username: RDP"
           Write-Host "Password: $(echo $env:RDP_CREDS)"
           Write-Host "==================`n"
+
+          while ($true) {
+              Write-Host "[$(Get-Date)] RDP Active - Ctrl+C in workflow to stop"
+              Start-Sleep -Seconds 300
+          }

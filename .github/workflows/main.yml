@@ -6,114 +6,190 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: 3600
 
     steps:
 
-    ############################################################
-    # Configure RDP
-    ############################################################
+#################################################################
+# 1️⃣ Configure Core RDP Settings
+#################################################################
     - name: Configure Core RDP Settings
       run: |
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-        netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-        Restart-Service TermService -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                           -Name "fDenyTSConnections" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                           -Name "UserAuthentication" -Value 0 -Force
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                           -Name "SecurityLayer" -Value 0 -Force
+        netsh advfirewall firewall delete rule name="RDP-Tailscale"
+        netsh advfirewall firewall add rule name="RDP-Tailscale" `
+          dir=in action=allow protocol=TCP localport=3389
+        Restart-Service -Name TermService -Force
 
-    ############################################################
-    # Create User
-    ############################################################
-    - name: Create RDP User
+#################################################################
+# 2️⃣ Create RDP User
+#################################################################
+    - name: Create RDP User with Secure Password
       run: |
-        $password = -join ((33..126) | Get-Random -Count 16 | % {[char]$_})
-        $secure = ConvertTo-SecureString $password -AsPlainText -Force
+        Add-Type -AssemblyName System.Security
 
-        if (-not (Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue)) {
-            New-LocalUser -Name "RDP" -Password $secure -AccountNeverExpires
+        $charSet = @{
+            Upper   = [char[]](65..90)
+            Lower   = [char[]](97..122)
+            Number  = [char[]](48..57)
+            Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
+        }
+
+        $rawPassword = @()
+        $rawPassword += $charSet.Upper | Get-Random -Count 4
+        $rawPassword += $charSet.Lower | Get-Random -Count 4
+        $rawPassword += $charSet.Number | Get-Random -Count 4
+        $rawPassword += $charSet.Special | Get-Random -Count 4
+
+        $password = -join ($rawPassword | Sort-Object { Get-Random })
+
+        $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+        $user = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
+
+        if (-not $user) {
+            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
             Add-LocalGroupMember -Group "Administrators" -Member "RDP"
             Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
         }
 
-        echo "RDP_PASS=$password" >> $env:GITHUB_ENV
+        echo "RDP_CREDS=$password" >> $env:GITHUB_ENV
 
-    ############################################################
-    # Install Tailscale
-    ############################################################
+#################################################################
+# 3️⃣ Install Tailscale
+#################################################################
     - name: Install Tailscale
       run: |
-        Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi -OutFile ts.msi
-        Start-Process msiexec.exe -ArgumentList "/i ts.msi /quiet /norestart" -Wait
+        $url="https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+        $file="$env:TEMP\tailscale.msi"
+        Invoke-WebRequest $url -OutFile $file
+        Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait
+        Remove-Item $file -Force
+
+#################################################################
+# 4️⃣ Connect Tailscale
+#################################################################
+    - name: Establish Tailscale Connection
+      run: |
         & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=rdp-node
 
-    ############################################################
-    # Install rclone
-    ############################################################
+        $ip=$null
+        for ($i=0;$i -lt 10;$i++){
+          $ip=& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+          if($ip){break}
+          Start-Sleep 5
+        }
+
+        if(-not $ip){exit 1}
+
+        echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
+
+#################################################################
+# 5️⃣ Verify RDP
+#################################################################
+    - name: Verify RDP Accessibility
+      run: |
+        Test-NetConnection $env:TAILSCALE_IP -Port 3389
+
+#################################################################
+# 6️⃣ Install rclone
+#################################################################
     - name: Install rclone
       run: |
         Invoke-WebRequest https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile rclone.zip
-        Expand-Archive rclone.zip $env:TEMP
-        Copy-Item "$env:TEMP\rclone*\rclone.exe" C:\Windows\System32\
+        Expand-Archive rclone.zip -DestinationPath $env:TEMP
+        Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
-    ############################################################
-    # Configure rclone (FIXED)
-    ############################################################
-    - name: Configure rclone
+#################################################################
+# 7️⃣ Restore Previous Session (✅ FIXED)
+#################################################################
+    - name: Restore Previous Session
       run: |
-        $confDir="$env:APPDATA\rclone"
-        New-Item -ItemType Directory -Force -Path $confDir
+        $conf="$env:APPDATA\rclone"
+        New-Item -ItemType Directory -Force -Path $conf
 
         @"
 [gdrive]
 type = drive
+scope = drive
 token = ${{ secrets.GDRIVE_TOKEN }}
-"@ | Out-File "$confDir\rclone.conf" -Encoding utf8
+"@ | Out-File "$conf\rclone.conf" -Encoding utf8
 
-    ############################################################
-    # Restore Session
-    ############################################################
-    - name: Restore Session
-      run: |
-        $exists = rclone lsf gdrive:rdp-backups --max-depth 1 | Select-String state.zip
+        rclone lsd gdrive:
+
+        $exists = rclone lsf gdrive:rdp-backups --max-depth 1 |
+          Where-Object { $_ -eq "state.zip" }
+
         if ($exists) {
-            mkdir C:\restore -ea 0
-            rclone copy gdrive:rdp-backups C:\restore
-            Expand-Archive C:\restore\state.zip C:\Users\RDP -Force -ErrorAction SilentlyContinue
-        } else {
-            Write-Host "First run — no backup."
+          Write-Host "Restoring backup..."
+          mkdir C:\restore -ea 0
+          rclone copy gdrive:rdp-backups C:\restore
+          Expand-Archive C:\restore\state.zip C:\Users\ -Force
+        }
+        else {
+          Write-Host "First run — no backup."
         }
 
-    ############################################################
-    # Maintain + Lifecycle
-    ############################################################
-    - name: Maintain Connection
+#################################################################
+# 8️⃣ Lifecycle Manager (✅ FIXED — NO FREEZE)
+#################################################################
+    - name: Lifecycle Manager
       run: |
-        Write-Host "Address: rdp-node.tailnet.ts.net"
-        Write-Host "Username: RDP"
-        Write-Host "Password: $env:RDP_PASS"
-
-        $start=Get-Date
-        $triggered=$false
+        $start = Get-Date
 
         while ($true) {
 
-          if(((Get-Date)-$start).TotalMinutes -ge 330 -and -not $triggered){
+          Write-Host "Heartbeat $(Get-Date)"
 
-            Compress-Archive C:\Users\RDP C:\state.zip -Force -ErrorAction SilentlyContinue
-            rclone copy C:\state.zip gdrive:rdp-backups
+          $elapsed=((Get-Date)-$start).TotalMinutes
 
-            $repo="${{ github.repository }}"
+          if ($elapsed -ge 330) {
+
+            Write-Host "Creating backup..."
+
+            mkdir C:\Users\RDP -ea 0
+
+            Compress-Archive `
+              -Path "C:\Users\RDP" `
+              -DestinationPath "C:\backup.zip" `
+              -Force `
+              -ErrorAction SilentlyContinue
+
+            rclone copy C:\backup.zip gdrive:rdp-backups
+
+            Write-Host "Triggering next workflow..."
+
             Invoke-RestMethod `
-              -Uri "https://api.github.com/repos/$repo/actions/workflows/RDP.yml/dispatches" `
+              -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/RDP.yml/dispatches" `
               -Method POST `
-              -Headers @{Authorization="token ${{ secrets.GH_PAT }}";Accept="application/vnd.github+json"} `
+              -Headers @{
+                Authorization="token ${{ secrets.GH_PAT }}"
+                Accept="application/vnd.github+json"
+              } `
               -Body '{"ref":"main"}'
 
-            $triggered=$true
+            Write-Host "Next session started."
+            break
           }
 
-          $ip=& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-          Write-Host "Heartbeat — $ip"
+          Start-Sleep 60
+        }
 
+#################################################################
+# 9️⃣ Maintain Connection
+#################################################################
+    - name: Maintain Connection
+      run: |
+        Write-Host "RDP Address: rdp-node.tailnet.ts.net"
+        Write-Host "Username: RDP"
+        Write-Host "Password: $env:RDP_CREDS"
+
+        while ($true) {
+          Write-Host "RDP Active $(Get-Date)"
           Start-Sleep 300
         }

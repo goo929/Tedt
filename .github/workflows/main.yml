@@ -2,6 +2,9 @@ name: RDP
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
   secure-rdp:
@@ -106,33 +109,24 @@ jobs:
         Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
 #################################################################
-# 7️⃣ Restore Previous Session (✅ FIXED)
+# 7️⃣ Restore Previous Session (✅ UPDATED)
 #################################################################
     - name: Restore Previous Session
       run: |
-        $conf="$env:APPDATA\rclone"
-        New-Item -ItemType Directory -Force -Path $conf
-
-        @"
-[gdrive]
-type = drive
-scope = drive
-token = ${{ secrets.GDRIVE_TOKEN }}
-"@ | Out-File "$conf\rclone.conf" -Encoding utf8
-
-        rclone lsd gdrive:
-
-        $exists = rclone lsf gdrive:rdp-backups --max-depth 1 |
-          Where-Object { $_ -eq "state.zip" }
-
-        if ($exists) {
-          Write-Host "Restoring backup..."
-          mkdir C:\restore -ea 0
-          rclone copy gdrive:rdp-backups C:\restore
-          Expand-Archive C:\restore\state.zip C:\Users\ -Force
-        }
-        else {
-          Write-Host "First run — no backup."
+        # Use single quotes around the secret to prevent shell expansion issues
+        rclone config create gdrive drive token '${{ secrets.GDRIVE_TOKEN }}'
+          
+        # Check if backup exists
+        $backupExists = rclone lsf gdrive:rdp-backups --max-depth 1 | Where-Object { $_ -match "state.zip" }
+          
+        if ($backupExists) {
+            Write-Host "Backup found. Restoring..."
+            if (-not (Test-Path "C:\restore")) { New-Item -Path "C:\restore" -ItemType Directory }
+            rclone copy gdrive:rdp-backups C:\restore --progress
+            # Ensure state.zip exists before expanding
+            Expand-Archive C:\restore\state.zip -DestinationPath "C:\Users\" -Force
+        } else {
+            Write-Host "No backup found. Starting fresh."
         }
 
 #################################################################
@@ -165,7 +159,7 @@ token = ${{ secrets.GDRIVE_TOKEN }}
             Write-Host "Triggering next workflow..."
 
             Invoke-RestMethod `
-              -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/RDP.yml/dispatches" `
+              -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/rdp.yml/dispatches" `
               -Method POST `
               -Headers @{
                 Authorization="token ${{ secrets.GH_PAT }}"

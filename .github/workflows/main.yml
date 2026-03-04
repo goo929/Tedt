@@ -118,7 +118,7 @@ jobs:
         $confDir = "$env:APPDATA\rclone"
         if (!(Test-Path $confDir)) { New-Item -ItemType Directory -Path $confDir -Force }
 
-        # Manually create the config file to avoid the "Waiting for code..." browser prompt
+        # Create rclone config file to avoid interactive login
         $rcloneConf = @"
 [gdrive]
 type = drive
@@ -127,13 +127,12 @@ token = $env:GDRIVE_TOKEN
 "@
         $rcloneConf | Out-File "$confDir\rclone.conf" -Encoding utf8
 
-        # Verify the connection works
+        # Verify Google Drive connection
         Write-Host "Verifying Google Drive connection..."
         rclone lsd gdrive:
 
-        # Check if backup exists
+        # Restore backup if exists
         $backupExists = rclone lsf gdrive:rdp-backups --max-depth 1 | Where-Object { $_ -match "state.zip" }
-
         if ($backupExists) {
             Write-Host "Backup found. Restoring..."
             if (-not (Test-Path "C:\restore")) { New-Item -Path "C:\restore" -ItemType Directory }
@@ -144,23 +143,18 @@ token = $env:GDRIVE_TOKEN
         }
 
 #################################################################
-# 8️⃣ Lifecycle Manager (✅ FIXED — NO FREEZE)
+# 8️⃣ Lifecycle Manager (✅ FIXED SYNTAX)
 #################################################################
     - name: Lifecycle Manager
       run: |
         $start = Get-Date
-
         while ($true) {
-
           Write-Host "Heartbeat $(Get-Date)"
-
-          $elapsed=((Get-Date)-$start).TotalMinutes
+          $elapsed = ((Get-Date) - $start).TotalMinutes
 
           if ($elapsed -ge 330) {
-
             Write-Host "Creating backup..."
-
-            mkdir C:\Users\RDP -ea 0
+            if (!(Test-Path "C:\Users\RDP")) { New-Item -ItemType Directory -Path "C:\Users\RDP" -Force }
 
             Compress-Archive `
               -Path "C:\Users\RDP" `
@@ -171,20 +165,18 @@ token = $env:GDRIVE_TOKEN
             rclone copy C:\backup.zip gdrive:rdp-backups
 
             Write-Host "Triggering next workflow..."
-
             Invoke-RestMethod `
               -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/rdp.yml/dispatches" `
               -Method POST `
               -Headers @{
-                Authorization="token ${{ secrets.GH_PAT }}"
-                Accept="application/vnd.github+json"
+                Authorization = "token ${{ secrets.GH_PAT }}"
+                Accept = "application/vnd.github+json"
               } `
               -Body '{"ref":"main"}'
 
             Write-Host "Next session started."
             break
           }
-
           Start-Sleep 60
         }
 

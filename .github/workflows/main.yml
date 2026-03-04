@@ -144,7 +144,7 @@ jobs:
           Write-Host "RDP Active | Time Elapsed: $([math]::Round($elapsed, 2)) min"
 
           # Use 330 minutes for a real session, or 10 for testing
-          if ($elapsed -ge 330) { 
+          if ($elapsed -ge 10) { 
             Write-Host "Time limit reached. Backing up..."
 
             $tempDir = "C:\temp_out"

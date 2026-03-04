@@ -118,7 +118,7 @@ jobs:
         $confDir = "$env:APPDATA\rclone"
         if (!(Test-Path $confDir)) { New-Item -ItemType Directory -Path $confDir -Force }
 
-        # Create rclone config manually to avoid interactive browser prompt
+        # Manually create the config file to avoid the "Waiting for code..." browser prompt
         $rcloneConf = @"
 [gdrive]
 type = drive
@@ -127,7 +127,7 @@ token = $env:GDRIVE_TOKEN
 "@
         $rcloneConf | Out-File "$confDir\rclone.conf" -Encoding utf8
 
-        # Verify connection
+        # Verify the connection works
         Write-Host "Verifying Google Drive connection..."
         rclone lsd gdrive:
 

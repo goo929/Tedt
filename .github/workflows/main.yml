@@ -48,6 +48,7 @@ jobs:
           $password = -join ($rawPassword | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
+          # ✅ Safe check: don't error if user doesn't exist
           $user = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
           if (-not $user) {
               New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
@@ -104,25 +105,12 @@ jobs:
           Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
       #################################################################
-      # 7️⃣ Configure rclone with secret token
-      #################################################################
-      - name: Configure rclone
-        run: |
-          $confDir = "$env:APPDATA\rclone"
-          if (-not (Test-Path $confDir)) { New-Item -Path $confDir -ItemType Directory }
-          $confPath = "$confDir\rclone.conf"
-
-          @"
-[gdrive]
-type = drive
-token = $env:GDRIVE_TOKEN
-"@ | Out-File -FilePath $confPath -Encoding UTF8
-
-      #################################################################
-      # 8️⃣ Restore previous session (skip if first run)
+      # 7️⃣ Restore previous session (skip if first run)
       #################################################################
       - name: Restore Previous Session
         run: |
+          rclone config create gdrive drive token "${{ secrets.GDRIVE_TOKEN }}"
+
           $backupExists = rclone lsf gdrive:rdp-backups --max-depth 1 | Where-Object { $_ -eq "state.zip" }
           if ($backupExists) {
               Write-Host "Backup found. Restoring previous session..."
@@ -135,7 +123,7 @@ token = $env:GDRIVE_TOKEN
           }
 
       #################################################################
-      # 9️⃣ Lifecycle Manager (auto backup + trigger next RDP)
+      # 8️⃣ Lifecycle Manager (auto backup + trigger next RDP)
       #################################################################
       - name: Lifecycle Manager
         run: |
@@ -162,7 +150,7 @@ token = $env:GDRIVE_TOKEN
           }
 
       #################################################################
-      # 🔟 Show RDP Credentials & maintain connection
+      # 9️⃣ Show RDP Credentials & maintain connection
       #################################################################
       - name: Maintain Connection
         run: |

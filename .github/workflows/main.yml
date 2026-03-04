@@ -128,7 +128,13 @@ jobs:
             Write-Host "Backup found. Downloading..."
             rclone copy mydrive:rdp-backups $backupDir --progress
 
-            # Dynamic detection of active RDP profile
+            # 1️⃣ FORCE PROFILE CREATION
+            Write-Host "Triggering profile creation..."
+            $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
+            $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
+            Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job | Receive-Job
+
+            # 2️⃣ DYNAMIC DETECTION
             $activeRDPProfile = Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1
 
             if ($activeRDPProfile) {
@@ -139,9 +145,11 @@ jobs:
                 if (Test-Path $extractTemp) { Remove-Item $extractTemp -Recurse -Force }
                 New-Item $extractTemp -ItemType Directory -Force
 
-                Write-Host "Extracting to $rdpPath..."
+                Write-Host "Extracting and Moving files..."
                 Expand-Archive -Path "$backupDir\state.zip" -DestinationPath $extractTemp -Force
-                Copy-Item -Path "$extractTemp\*" -Destination $rdpPath -Recurse -Force -ErrorAction SilentlyContinue
+
+                # Robocopy to merge files safely
+                robocopy $extractTemp $rdpPath /E /XJ /R:0 /W:0 /NP /NFL /NDL
 
                 Write-Host "Session restored successfully to $rdpPath."
                 Remove-Item $extractTemp -Recurse -Force
@@ -162,12 +170,11 @@ jobs:
           Write-Host "RDP Active | Time Elapsed: $([math]::Round($elapsed, 2)) min"
 
           # Backup & dispatch workflow
-          if ($elapsed -ge 7) { 
+          if ($elapsed -ge 7) {
             Write-Host "Time limit reached. Backing up..."
 
-            # Find active profile dynamically again for backup
             $activeRDPProfile = Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1
-            if ($activeRDPProfile) { $sourcePath = $activeRDPProfile.FullName } else { $sourcePath = "C:\Users\RDP" }
+            $sourcePath = if ($activeRDPProfile) { $activeRDPProfile.FullName } else { "C:\Users\RDP" }
 
             $tempDir = "C:\temp_out"
             if (!(Test-Path $tempDir)) { New-Item $tempDir -ItemType Directory -Force }
@@ -187,7 +194,5 @@ jobs:
 
             break
           }
-
-          # Heartbeat every 5 minutes
           Start-Sleep 300
         }

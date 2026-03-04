@@ -109,29 +109,35 @@ jobs:
         Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
 #################################################################
-# 7️⃣ Restore Previous Session (✅ NON-INTERACTIVE)
+# 7️⃣ Restore Previous Session (✅ FIXED ERROR HANDLING)
 #################################################################
     - name: Restore Previous Session
       env:
         GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
       run: |
-        # Configure rclone using environment variables (non-interactive)
+        # Configure rclone for non-interactive use
         $env:RCLONE_CONFIG_GDRIVE_TYPE = "drive"
         $env:RCLONE_CONFIG_GDRIVE_TOKEN = '${{ secrets.GDRIVE_TOKEN }}'
 
-        # Verify Google Drive connection
-        Write-Host "Verifying Google Drive connection..."
-        rclone lsd gdrive:
+        Write-Host "Checking for backup directory..."
 
-        # Check if backup exists
-        $backupExists = rclone lsf gdrive:rdp-backups --max-depth 1 | Where-Object { $_ -match "state.zip" }
-        if ($backupExists) {
-            Write-Host "Backup found. Restoring..."
-            if (-not (Test-Path "C:\restore")) { New-Item -Path "C:\restore" -ItemType Directory }
-            rclone copy gdrive:rdp-backups C:\restore --progress
-            Expand-Archive C:\restore\state.zip -DestinationPath "C:\Users\" -Force
+        # Check if 'rdp-backups' folder exists
+        $dirCheck = rclone lsd gdrive: | Where-Object { $_ -match "rdp-backups" }
+
+        if ($dirCheck) {
+            Write-Host "Backup directory found. Checking for state.zip..."
+            $backupExists = rclone lsf gdrive:rdp-backups --max-depth 1 | Where-Object { $_ -match "state.zip" }
+
+            if ($backupExists) {
+                Write-Host "Backup file found. Restoring..."
+                if (-not (Test-Path "C:\restore")) { New-Item -Path "C:\restore" -ItemType Directory }
+                rclone copy gdrive:rdp-backups C:\restore --progress
+                Expand-Archive C:\restore\state.zip -DestinationPath "C:\Users\" -Force
+            } else {
+                Write-Host "rdp-backups folder exists but state.zip is missing."
+            }
         } else {
-            Write-Host "No backup found. Starting fresh."
+            Write-Host "No rdp-backups folder found on Drive. This is likely the first run."
         }
 
 #################################################################

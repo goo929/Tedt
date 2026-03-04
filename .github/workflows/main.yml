@@ -109,73 +109,62 @@ jobs:
         Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
 #################################################################
-# 7️⃣ Restore Previous Session (Targeted Folders)
+# 7️⃣ Restore & Lifecycle (Combined)
 #################################################################
-    - name: Restore Previous Session
+    - name: Restore, Run, and Backup
       env:
-        # Note the 'MYDRIVE' name here must match the command below
         RCLONE_CONFIG_MYDRIVE_TYPE: "drive"
         RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
+        GH_PAT: ${{ secrets.GH_PAT }}
+        RDP_CREDS: ${{ env.RDP_CREDS }}
       run: |
         $backupDir = "C:\backups"
         if (!(Test-Path $backupDir)) { New-Item $backupDir -ItemType Directory -Force }
 
+        # --- RESTORE PHASE ---
         Write-Host "Checking GDrive for rdp-backups/state.zip..."
-        
-        # Use 'lsf' but catch errors if the folder doesn't exist
         $backupExists = rclone lsf mydrive:rdp-backups --max-depth 1 2>$null | Where-Object { $_ -match "state.zip" }
 
         if ($backupExists) {
-            Write-Host "Backup found. Downloading..."
+            Write-Host "Backup found. Downloading and Restoring..."
             rclone copy mydrive:rdp-backups $backupDir --progress
-            
-            # Ensure the RDP user folder exists before extracting
             if (!(Test-Path "C:\Users\RDP")) { New-Item "C:\Users\RDP" -ItemType Directory -Force }
-            
             Expand-Archive "$backupDir\state.zip" -DestinationPath "C:\Users\RDP" -Force
-            Write-Host "Session restored successfully."
         } else {
-            Write-Host "No previous backup found or folder missing. Starting fresh."
+            Write-Host "No previous backup found. This is a fresh session."
         }
 
-#################################################################
-# 8️⃣ Lifecycle & Targeted Backup (Every 10 minutes)
-#################################################################
-    - name: Lifecycle & Maintain Connection
-      env:
-        RCLONE_CONFIG_MYDRIVE_TYPE: "drive"
-        RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
-        RDP_CREDS: ${{ env.RDP_CREDS }}
-      run: |
+        # --- LIFECYCLE PHASE (KEEP ALIVE) ---
         $start = Get-Date
+        Write-Host "--- RDP SESSION ACTIVE ---"
+        Write-Host "User: RDP | Pass: $env:RDP_CREDS"
+
         while ($true) {
           $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
           Write-Host "RDP Active | Time Elapsed: $([math]::Round($elapsed, 2)) min"
 
-          if ($elapsed -ge 10) {
-            Write-Host "Time limit reached. Preparing backup..."
+          # Use 330 minutes for a real session, or 10 for testing
+          if ($elapsed -ge 330) { 
+            Write-Host "Time limit reached. Backing up..."
 
-            $sourcePath = "C:\Users\RDP"
-            $tempDir = "C:\temp_backup"
-            $destZip = "$tempDir\state.zip"
-
+            $tempDir = "C:\temp_out"
             if (!(Test-Path $tempDir)) { New-Item $tempDir -ItemType Directory -Force }
-
-            # Create the zip. -ErrorAction SilentlyContinue ignores files currently in use by Windows
-            Compress-Archive -Path "$sourcePath\*" -DestinationPath $destZip -Force -ErrorAction SilentlyContinue
+            
+            # Use -ErrorAction SilentlyContinue because some system files in \RDP\ might be locked
+            Compress-Archive -Path "C:\Users\RDP\*" -DestinationPath "$tempDir\state.zip" -Force -ErrorAction SilentlyContinue
 
             Write-Host "Uploading to Google Drive..."
-            # Using 'copyto' ensures the file goes exactly where intended
-            rclone copy $destZip "mydrive:rdp-backups" --progress
+            rclone copy "$tempDir\state.zip" "mydrive:rdp-backups" --progress
 
             Write-Host "Triggering next workflow..."
             $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"
             Invoke-RestMethod -Uri $uri -Method POST -Headers @{
-                Authorization = "token ${{ secrets.GH_PAT }}"
+                Authorization = "token $env:GH_PAT"
                 Accept = "application/vnd.github+json"
             } -Body '{"ref":"main"}'
 
             break
           }
-          Start-Sleep 60
+          # Heartbeat every 5 minutes
+          Start-Sleep 300
         }

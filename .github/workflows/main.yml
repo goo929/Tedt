@@ -27,7 +27,7 @@ jobs:
           Restart-Service -Name TermService -Force
 
       #################################################################
-      # 2️⃣ Create RDP User
+      # 2️⃣ Create RDP User with Secure Password
       #################################################################
       - name: Create RDP User with Secure Password
         run: |
@@ -45,11 +45,15 @@ jobs:
           $rawPassword += $charSet.Special | Get-Random -Count 4
           $password = -join ($rawPassword | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          if (-not (Get-LocalUser -Name "RDP")) {
+
+          # Safe check if user exists
+          $user = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
+          if (-not $user) {
               New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
               Add-LocalGroupMember -Group "Administrators" -Member "RDP"
               Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
           }
+
           echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
 
       #################################################################
@@ -130,7 +134,6 @@ jobs:
                   Write-Host "Backing up files..."
                   if (-not (Test-Path "C:\Users\RDP")) { New-Item -Path "C:\Users\RDP" -ItemType Directory }
                   Compress-Archive -Path "C:\Users\RDP" -DestinationPath "C:\backup.zip" -Force
-                  if (-not (Test-Path "C:\backup")) { New-Item -Path "C:\backup" -ItemType Directory }
                   rclone copy "C:\backup.zip" gdrive:rdp-backups --progress
 
                   Write-Host "Triggering next RDP..."

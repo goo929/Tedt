@@ -48,7 +48,6 @@ jobs:
           $password = -join ($rawPassword | Sort-Object { Get-Random })
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
-          # ✅ Safe check: don't error if user exists
           $user = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
           if (-not $user) {
               New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
@@ -112,6 +111,7 @@ jobs:
           $confDir = "$env:APPDATA\rclone"
           if (-not (Test-Path $confDir)) { New-Item -Path $confDir -ItemType Directory }
           $confPath = "$confDir\rclone.conf"
+
           @"
 [gdrive]
 type = drive
@@ -162,7 +162,7 @@ token = $env:GDRIVE_TOKEN
           }
 
       #################################################################
-      # 10️⃣ Show RDP Credentials & maintain connection
+      # 🔟 Show RDP Credentials & maintain connection
       #################################################################
       - name: Maintain Connection
         run: |

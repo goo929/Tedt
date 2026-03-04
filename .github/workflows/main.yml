@@ -141,28 +141,50 @@ jobs:
         }
 
 #################################################################
-# 8️⃣ Lifecycle Manager
+# 8️⃣ Lifecycle & Maintain Connection (COMBINED)
 #################################################################
-    - name: Lifecycle Manager
+    - name: Lifecycle & Maintain Connection
+      env:
+        GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
       run: |
+        # Configure rclone
+        $env:RCLONE_CONFIG_GDRIVE_TYPE = "drive"
+        $env:RCLONE_CONFIG_GDRIVE_TOKEN = '${{ secrets.GDRIVE_TOKEN }}'
+
         $start = Get-Date
+        Write-Host "--- RDP SESSION INFO ---"
+        Write-Host "RDP Address: rdp-node.tailnet.ts.net"
+        Write-Host "Username: RDP"
+        Write-Host "Password: $env:RDP_CREDS"
+        Write-Host "------------------------"
+
         while ($true) {
-          Write-Host "Heartbeat $(Get-Date)"
-          $elapsed = ((Get-Date) - $start).TotalMinutes
+          $now = Get-Date
+          $elapsed = ($now - $start).TotalMinutes
+          
+          # Print Status Heartbeat
+          Write-Host "RDP Active | Time Elapsed: $([math]::Round($elapsed, 2)) min | $(Get-Date)"
 
+          # Check if it's time to cycle the runner (at 330 minutes)
           if ($elapsed -ge 330) {
-            Write-Host "Creating backup..."
-            if (!(Test-Path "C:\Users\RDP")) { New-Item -ItemType Directory -Path "C:\Users\RDP" -Force }
+            Write-Host "Time limit reached. Starting migration..."
 
+            # 1️⃣ Create Backup
+            Write-Host "Compressing C:\Users\RDP..."
+            if (!(Test-Path "C:\Users\RDP")) { New-Item -ItemType Directory -Path "C:\Users\RDP" -Force }
+            
             Compress-Archive `
               -Path "C:\Users\RDP" `
-              -DestinationPath "C:\backup.zip" `
+              -DestinationPath "C:\state.zip" `
               -Force `
               -ErrorAction SilentlyContinue
 
-            rclone copy C:\backup.zip gdrive:rdp-backups
+            # 2️⃣ Upload to Drive
+            Write-Host "Uploading state.zip to Google Drive..."
+            rclone copy C:\state.zip gdrive:rdp-backups --progress
 
-            Write-Host "Triggering next workflow..."
+            # 3️⃣ Trigger next runner
+            Write-Host "Triggering next workflow dispatch..."
             Invoke-RestMethod `
               -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/rdp.yml/dispatches" `
               -Method POST `
@@ -172,22 +194,10 @@ jobs:
               } `
               -Body '{"ref":"main"}'
 
-            Write-Host "Next session started."
+            Write-Host "Success. Terminating current session."
             break
           }
-          Start-Sleep 60
-        }
 
-#################################################################
-# 9️⃣ Maintain Connection
-#################################################################
-    - name: Maintain Connection
-      run: |
-        Write-Host "RDP Address: rdp-node.tailnet.ts.net"
-        Write-Host "Username: RDP"
-        Write-Host "Password: $env:RDP_CREDS"
-
-        while ($true) {
-          Write-Host "RDP Active $(Get-Date)"
+          # Wait 5 minutes before checking again
           Start-Sleep 300
         }

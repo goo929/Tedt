@@ -109,95 +109,64 @@ jobs:
         Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
 #################################################################
-# 7️⃣ Restore Previous Session (✅ FIXED ERROR HANDLING)
+# 7️⃣ Restore Previous Session (Targeted Folders)
 #################################################################
     - name: Restore Previous Session
       env:
-        GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
+        RCLONE_CONFIG_GDRIVE_TYPE: "drive"
+        RCLONE_CONFIG_GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
       run: |
-        # Configure rclone for non-interactive use
-        $env:RCLONE_CONFIG_GDRIVE_TYPE = "drive"
-        $env:RCLONE_CONFIG_GDRIVE_TOKEN = '${{ secrets.GDRIVE_TOKEN }}'
+        $backupDir = "C:\backups"
+        if (!(Test-Path $backupDir)) { New-Item $backupDir -ItemType Directory }
 
-        Write-Host "Checking for backup directory..."
+        Write-Host "Checking GDrive for state.zip..."
+        $backupExists = rclone lsf gdrive:rdp-backups --max-depth 1 | Where-Object { $_ -match "state.zip" }
 
-        # Check if 'rdp-backups' folder exists
-        $dirCheck = rclone lsd gdrive: | Where-Object { $_ -match "rdp-backups" }
-
-        if ($dirCheck) {
-            Write-Host "Backup directory found. Checking for state.zip..."
-            $backupExists = rclone lsf gdrive:rdp-backups --max-depth 1 | Where-Object { $_ -match "state.zip" }
-
-            if ($backupExists) {
-                Write-Host "Backup file found. Restoring..."
-                if (-not (Test-Path "C:\restore")) { New-Item -Path "C:\restore" -ItemType Directory }
-                rclone copy gdrive:rdp-backups C:\restore --progress
-                Expand-Archive C:\restore\state.zip -DestinationPath "C:\Users\" -Force
-            } else {
-                Write-Host "rdp-backups folder exists but state.zip is missing."
-            }
+        if ($backupExists) {
+            rclone copy gdrive:rdp-backups $backupDir --progress
+            # Restore to RDP user profile
+            Expand-Archive "$backupDir\state.zip" -DestinationPath "C:\Users\RDP" -Force
+            Write-Host "Session restored successfully."
         } else {
-            Write-Host "No rdp-backups folder found on Drive. This is likely the first run."
+            Write-Host "No previous backup found. Starting fresh session."
         }
 
 #################################################################
-# 8️⃣ Lifecycle & Maintain Connection (COMBINED)
+# 8️⃣ Lifecycle & Targeted Backup (Every 10 minutes)
 #################################################################
     - name: Lifecycle & Maintain Connection
       env:
-        GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
+        RCLONE_CONFIG_GDRIVE_TYPE: "drive"
+        RCLONE_CONFIG_GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
+        RDP_CREDS: ${{ env.RDP_CREDS }}
       run: |
-        # Configure rclone
-        $env:RCLONE_CONFIG_GDRIVE_TYPE = "drive"
-        $env:RCLONE_CONFIG_GDRIVE_TOKEN = '${{ secrets.GDRIVE_TOKEN }}'
-
         $start = Get-Date
-        Write-Host "--- RDP SESSION INFO ---"
-        Write-Host "RDP Address: rdp-node.tailnet.ts.net"
-        Write-Host "Username: RDP"
-        Write-Host "Password: $env:RDP_CREDS"
-        Write-Host "------------------------"
-
         while ($true) {
-          $now = Get-Date
-          $elapsed = ($now - $start).TotalMinutes
-          
-          # Print Status Heartbeat
-          Write-Host "RDP Active | Time Elapsed: $([math]::Round($elapsed, 2)) min | $(Get-Date)"
+          $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
+          Write-Host "RDP Active | Time Elapsed: $([math]::Round($elapsed, 2)) min"
 
-          # Check if it's time to cycle the runner (at 330 minutes)
-          if ($elapsed -ge 330) {
-            Write-Host "Time limit reached. Starting migration..."
+          # Cycle session every 10 minutes
+          if ($elapsed -ge 10) {
+            Write-Host "Time limit reached. Starting targeted backup..."
 
-            # 1️⃣ Create Backup
-            Write-Host "Compressing C:\Users\RDP..."
-            if (!(Test-Path "C:\Users\RDP")) { New-Item -ItemType Directory -Path "C:\Users\RDP" -Force }
-            
-            Compress-Archive `
-              -Path "C:\Users\RDP" `
-              -DestinationPath "C:\state.zip" `
-              -Force `
-              -ErrorAction SilentlyContinue
+            $sourcePath = "C:\Users\RDP"
+            $destZip = "C:\temp_backup\state.zip"
+            if (!(Test-Path "C:\temp_backup")) { New-Item "C:\temp_backup" -ItemType Directory }
 
-            # 2️⃣ Upload to Drive
+            Compress-Archive -Path "$sourcePath\*" -DestinationPath $destZip -Force
+
             Write-Host "Uploading state.zip to Google Drive..."
-            rclone copy C:\state.zip gdrive:rdp-backups --progress
+            rclone copy "C:\temp_backup" gdrive:rdp-backups --progress
 
-            # 3️⃣ Trigger next runner
-            Write-Host "Triggering next workflow dispatch..."
-            Invoke-RestMethod `
-              -Uri "https://api.github.com/repos/${{ github.repository }}/actions/workflows/rdp.yml/dispatches" `
-              -Method POST `
-              -Headers @{
+            Write-Host "Triggering next workflow..."
+            $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"
+            Invoke-RestMethod -Uri $uri -Method POST -Headers @{
                 Authorization = "token ${{ secrets.GH_PAT }}"
                 Accept = "application/vnd.github+json"
-              } `
-              -Body '{"ref":"main"}'
+            } -Body '{"ref":"main"}'
 
-            Write-Host "Success. Terminating current session."
+            Write-Host "Backup complete. Terminating current session."
             break
           }
-
-          # Wait 5 minutes before checking again
-          Start-Sleep 300
+          Start-Sleep 60
         }

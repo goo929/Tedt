@@ -50,7 +50,6 @@ jobs:
         $rawPassword += $charSet.Special | Get-Random -Count 4
 
         $password = -join ($rawPassword | Sort-Object { Get-Random })
-
         $securePass = ConvertTo-SecureString $password -AsPlainText -Force
 
         $user = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue
@@ -109,7 +108,7 @@ jobs:
         Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
 #################################################################
-# 7️⃣ Restore & Lifecycle (Combined)
+# 7️⃣ Restore & Lifecycle (Dynamic Profile Detection)
 #################################################################
     - name: Restore, Run, and Backup
       env:
@@ -129,13 +128,28 @@ jobs:
             Write-Host "Backup found. Downloading..."
             rclone copy mydrive:rdp-backups $backupDir --progress
 
-            # Ensure the RDP user folder exists before extracting
-            if (!(Test-Path "C:\Users\RDP")) { New-Item "C:\Users\RDP" -ItemType Directory -Force }
+            # Dynamic detection of active RDP profile
+            $activeRDPProfile = Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1
 
-            Expand-Archive "$backupDir\state.zip" -DestinationPath "C:\Users\RDP" -Force
-            Write-Host "Session restored successfully."
+            if ($activeRDPProfile) {
+                $rdpPath = $activeRDPProfile.FullName
+                Write-Host "Detected Active Profile Folder: $rdpPath"
+
+                $extractTemp = "C:\extract_temp"
+                if (Test-Path $extractTemp) { Remove-Item $extractTemp -Recurse -Force }
+                New-Item $extractTemp -ItemType Directory -Force
+
+                Write-Host "Extracting to $rdpPath..."
+                Expand-Archive -Path "$backupDir\state.zip" -DestinationPath $extractTemp -Force
+                Copy-Item -Path "$extractTemp\*" -Destination $rdpPath -Recurse -Force -ErrorAction SilentlyContinue
+
+                Write-Host "Session restored successfully to $rdpPath."
+                Remove-Item $extractTemp -Recurse -Force
+            } else {
+                Write-Host "Error: Could not find an active RDP user profile folder."
+            }
         } else {
-            Write-Host "No previous backup found or folder missing. Starting fresh."
+            Write-Host "No previous backup found. Starting fresh."
         }
 
         # --- LIFECYCLE PHASE (KEEP ALIVE) ---
@@ -147,15 +161,19 @@ jobs:
           $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
           Write-Host "RDP Active | Time Elapsed: $([math]::Round($elapsed, 2)) min"
 
-          # Use 330 minutes for a real session, or 10 for testing
-          if ($elapsed -ge 330) { 
+          # Backup & dispatch workflow
+          if ($elapsed -ge 7) { 
             Write-Host "Time limit reached. Backing up..."
+
+            # Find active profile dynamically again for backup
+            $activeRDPProfile = Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1
+            if ($activeRDPProfile) { $sourcePath = $activeRDPProfile.FullName } else { $sourcePath = "C:\Users\RDP" }
 
             $tempDir = "C:\temp_out"
             if (!(Test-Path $tempDir)) { New-Item $tempDir -ItemType Directory -Force }
-            
-            # Use -ErrorAction SilentlyContinue because some system files in \RDP\ might be locked
-            Compress-Archive -Path "C:\Users\RDP\*" -DestinationPath "$tempDir\state.zip" -Force -ErrorAction SilentlyContinue
+
+            Write-Host "Zipping profile: $sourcePath"
+            Compress-Archive -Path "$sourcePath\*" -DestinationPath "$tempDir\state.zip" -Force -ErrorAction SilentlyContinue
 
             Write-Host "Uploading to Google Drive..."
             rclone copy "$tempDir\state.zip" "mydrive:rdp-backups" --progress
@@ -169,6 +187,7 @@ jobs:
 
             break
           }
+
           # Heartbeat every 5 minutes
           Start-Sleep 300
         }

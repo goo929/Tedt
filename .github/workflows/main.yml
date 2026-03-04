@@ -109,21 +109,35 @@ jobs:
         Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
 #################################################################
-# 7️⃣ Restore Previous Session (✅ UPDATED)
+# 7️⃣ Restore Previous Session (✅ NON-INTERACTIVE FIX)
 #################################################################
     - name: Restore Previous Session
+      env:
+        GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
       run: |
-        # Use single quotes around the secret to prevent shell expansion issues
-        rclone config create gdrive drive token '${{ secrets.GDRIVE_TOKEN }}'
-          
+        $confDir = "$env:APPDATA\rclone"
+        if (!(Test-Path $confDir)) { New-Item -ItemType Directory -Path $confDir -Force }
+
+        # Create rclone config manually to avoid interactive browser prompt
+        $rcloneConf = @"
+[gdrive]
+type = drive
+scope = drive
+token = $env:GDRIVE_TOKEN
+"@
+        $rcloneConf | Out-File "$confDir\rclone.conf" -Encoding utf8
+
+        # Verify connection
+        Write-Host "Verifying Google Drive connection..."
+        rclone lsd gdrive:
+
         # Check if backup exists
         $backupExists = rclone lsf gdrive:rdp-backups --max-depth 1 | Where-Object { $_ -match "state.zip" }
-          
+
         if ($backupExists) {
             Write-Host "Backup found. Restoring..."
             if (-not (Test-Path "C:\restore")) { New-Item -Path "C:\restore" -ItemType Directory }
             rclone copy gdrive:rdp-backups C:\restore --progress
-            # Ensure state.zip exists before expanding
             Expand-Archive C:\restore\state.zip -DestinationPath "C:\Users\" -Force
         } else {
             Write-Host "No backup found. Starting fresh."

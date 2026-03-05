@@ -86,7 +86,7 @@ jobs:
         Test-NetConnection $env:TAILSCALE_IP -Port 3389
 
 #################################################################
-# 5.5️⃣ Send Credentials to Telegram
+# 5.5️⃣ Send Credentials to Telegram (Fixed HTML Parsing)
 #################################################################
     - name: Send Notification to Telegram
       env:
@@ -95,21 +95,22 @@ jobs:
         RDP_PASS: ${{ env.RDP_CREDS }}
         RDP_IP: ${{ env.TAILSCALE_IP }}
       run: |
+        # Use HTML tags to prevent parsing errors with special characters in passwords
         $message = @"
-        🚀 *New RDP Session Ready*
+        🚀 <b>New RDP Session Ready</b>
 
-        🌐 *IP:* ``$($env:RDP_IP)``
-        👤 *User:* RDP
-        🔑 *Pass:* ``$($env:RDP_PASS)``
+        🌐 <b>IP:</b> <code>$($env:RDP_IP)</code>
+        👤 <b>User:</b> <code>RDP</code>
+        🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
-        _Session will auto-backup in 5.5 hours._
+        <i>Session will auto-backup in 5.5 hours.</i>
         "@
-
+        
         $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
         $body = @{
             chat_id = $env:TELEGRAM_CHAT_ID
             text = $message
-            parse_mode = "Markdown"
+            parse_mode = "HTML"
         } | ConvertTo-Json
 
         Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body

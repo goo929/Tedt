@@ -95,7 +95,7 @@ jobs:
         👤 <b>User:</b> <code>RDP</code>
         🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
-        <i>Session will auto-backup in 5.5 hours.</i>
+        <i>Session persistent backup enabled (C: Delta + D: Drive).</i>
         "@
         
         $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
@@ -117,7 +117,7 @@ jobs:
         Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
 #################################################################
-# 7️⃣ Restore & Lifecycle
+# 7️⃣ Enhanced Persistence (C: Delta + D: Drive)
 #################################################################
     - name: Restore, Run, and Backup
       env:
@@ -129,52 +129,73 @@ jobs:
         $backupDir = "C:\backups"
         if (!(Test-Path $backupDir)) { New-Item $backupDir -ItemType Directory -Force }
 
+        # --- PHASE 1: RESTORE ---
         Write-Host "Checking GDrive for state.zip..."
         $backupExists = rclone lsf mydrive:rdp-backups --max-depth 1 2>$null | Where-Object { $_ -match "state.zip" }
 
         if ($backupExists) {
-            Write-Host "✅ Backup found. Downloading..."
+            Write-Host "✅ Found State. Downloading..."
             rclone copy mydrive:rdp-backups $backupDir --progress
-
-            Write-Host "🔥 SELF-DESTRUCT: Deleting cloud backup..."
             rclone deletefile mydrive:rdp-backups/state.zip
+
+            Write-Host "Extracting State..."
+            $extractTemp = "C:\extract_temp"
+            Expand-Archive -Path "$backupDir\state.zip" -DestinationPath $extractTemp -Force
+
+            # Restore C: Program Files (Delta only - skip existing)
+            Write-Host "Restoring Apps..."
+            robocopy "$extractTemp\Prog" "C:\Program Files" /E /XJ /R:0 /W:0 /XX
+            robocopy "$extractTemp\Prog86" "C:\Program Files (x86)" /E /XJ /R:0 /W:0 /XX
+            robocopy "$extractTemp\ProgData" "C:\ProgramData" /E /XJ /R:0 /W:0 /XX
             
-            Write-Host "Triggering profile creation..."
+            # Restore D: Drive
+            if (Test-Path "D:\") {
+                robocopy "$extractTemp\DriveD" "D:\" /E /XJ /R:0 /W:0
+            }
+
+            # Restore User Profile (Desktop, VSCode, etc.)
             $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
             $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
-            Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job | Receive-Job
-
-            $activeRDPProfile = Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1
-            if ($activeRDPProfile) {
-                $rdpPath = $activeRDPProfile.FullName
-                $extractTemp = "C:\extract_temp"
-                if (Test-Path $extractTemp) { Remove-Item $extractTemp -Recurse -Force }
-                New-Item $extractTemp -ItemType Directory -Force
-                Expand-Archive -Path "$backupDir\state.zip" -DestinationPath $extractTemp -Force
-                robocopy $extractTemp $rdpPath /E /XJ /R:0 /W:0 /NP /NFL /NDL
-                Write-Host "Session restored successfully."
-            }
+            Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
+            $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
+            robocopy "$extractTemp\User" $rdpPath /E /XJ /R:0 /W:0
         } else {
-            Write-Host "ℹ️ No state.zip found. Starting fresh."
+            Write-Host "ℹ️ No state.zip found. Starting fresh session."
         }
 
+        # --- PHASE 2: KEEP ALIVE & LOOP ---
         $start = Get-Date
-        Write-Host "--- KEEP-ALIVE ACTIVE ---"
         while ($true) {
           $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
-          Write-Host "RDP Active | Time Elapsed: $([math]::Round($elapsed, 2)) min"
+          Write-Host "RDP Active | Time: $([math]::Round($elapsed, 2)) min"
 
-          if ($elapsed -ge 5) {
+          if ($elapsed -ge 330) {
             try {
-                Write-Host "Time limit reached. Backing up..."
-                $activeRDPProfile = Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1
-                $sourcePath = if ($activeRDPProfile) { $activeRDPProfile.FullName } else { "C:\Users\RDP" }
-                $tempDir = "C:\temp_out"
-                if (!(Test-Path $tempDir)) { New-Item $tempDir -ItemType Directory -Force }
+                Write-Host "⏳ Time limit reached. Starting Deep Backup..."
+                $packDir = "C:\to_pack"
+                New-Item $packDir -ItemType Directory -Force
                 
-                Compress-Archive -Path "$sourcePath\*" -DestinationPath "$tempDir\state.zip" -Force -ErrorAction SilentlyContinue
-                rclone copy "$tempDir\state.zip" "mydrive:rdp-backups" --progress
+                # 1. Grab User Profile
+                $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
+                robocopy $rdpPath "$packDir\User" /E /XJ /XD "AppData\Local\Temp" "AppData\Local\Microsoft\Windows" /R:0 /W:0
                 
+                # 2. Grab Program Deltas (Only newer/different files)
+                robocopy "C:\Program Files" "$packDir\Prog" /E /XJ /XO /R:0 /W:0
+                robocopy "C:\Program Files (x86)" "$packDir\Prog86" /E /XJ /XO /R:0 /W:0
+                robocopy "C:\ProgramData" "$packDir\ProgData" /E /XJ /XO /R:0 /W:0
+                
+                # 3. Grab D: Drive
+                if (Test-Path "D:\") {
+                    robocopy "D:\" "$packDir\DriveD" /E /XJ /R:0 /W:0
+                }
+
+                Write-Host "Zipping everything..."
+                Compress-Archive -Path "$packDir\*" -DestinationPath "C:\backups\state.zip" -Force
+                
+                Write-Host "Uploading to GDrive..."
+                rclone copy "C:\backups\state.zip" "mydrive:rdp-backups" --progress
+                
+                Write-Host "Triggering next workflow..."
                 $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"
                 Invoke-RestMethod -Uri $uri -Method POST -Headers @{
                     Authorization = "token $env:GH_PAT"
@@ -182,7 +203,7 @@ jobs:
                 } -Body '{"ref":"main"}'
                 break
             } catch {
-                Write-Host "Error during backup: $($_.Exception.Message)"
+                Write-Host "Error during deep backup: $($_.Exception.Message)"
                 exit 1
             }
           }
@@ -199,12 +220,12 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
         $status = "${{ job.status }}"
-        $message = "🏁 <b>RDP Session Ended</b>`nStatus: <b>$status</b>`n`nNext workflow has been triggered (if backup was successful)."
+        $message = "🏁 <b>RDP Session Transitioned</b>`nStatus: <b>$status</b>`n`nDeep Backup (C: Delta + D:) complete. Next loop starting..."
         
         $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
         $body = @{
-            chat_id = $env:TELEGRAM_CHAT_ID
-            text = $message
+            chat_id = $env:TELEGRAM_CHAT_ID;
+            text = $message;
             parse_mode = "HTML"
         } | ConvertTo-Json
 

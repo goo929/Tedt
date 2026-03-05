@@ -79,7 +79,7 @@ jobs:
         echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
 
 #################################################################
-# 5.5️⃣ Send Credentials to Telegram
+# 5️⃣ Send Credentials to Telegram
 #################################################################
     - name: Send Notification to Telegram
       env:
@@ -95,7 +95,7 @@ jobs:
         👤 <b>User:</b> <code>RDP</code>
         🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
-        <i>Session persistent backup enabled (C: Delta + D: Drive).</i>
+        <i>Deep Persistence Active: C-Delta & D-Drive.</i>
         "@
         
         $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
@@ -117,7 +117,7 @@ jobs:
         Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
 #################################################################
-# 7️⃣ Enhanced Persistence (C: Delta + D: Drive)
+# 7️⃣ Enhanced Persistence (Using D: for Staging)
 #################################################################
     - name: Restore, Run, and Backup
       env:
@@ -126,92 +126,76 @@ jobs:
         GH_PAT: ${{ secrets.GH_PAT }}
         RDP_CREDS: ${{ env.RDP_CREDS }}
       run: |
-        $backupDir = "C:\backups"
-        if (!(Test-Path $backupDir)) { New-Item $backupDir -ItemType Directory -Force }
+        # Use D: drive for staging to avoid "No Space on Disk" (C: is too small)
+        $workDir = "D:\persistence_stage"
+        $localZip = "D:\state.zip"
+        if (!(Test-Path $workDir)) { New-Item $workDir -ItemType Directory -Force }
 
         # --- PHASE 1: RESTORE ---
         Write-Host "Checking GDrive for state.zip..."
         $backupExists = rclone lsf mydrive:rdp-backups --max-depth 1 2>$null | Where-Object { $_ -match "state.zip" }
 
         if ($backupExists) {
-            Write-Host "✅ Found State. Downloading..."
-            rclone copy mydrive:rdp-backups $backupDir --progress
-            rclone deletefile mydrive:rdp-backups/state.zip
+            Write-Host "✅ Found State. Downloading to D:..."
+            rclone copy mydrive:rdp-backups/state.zip D:\ --progress
+            Expand-Archive -Path $localZip -DestinationPath $workDir -Force
 
-            Write-Host "Extracting State..."
-            $extractTemp = "C:\extract_temp"
-            Expand-Archive -Path "$backupDir\state.zip" -DestinationPath $extractTemp -Force
-
-            # Restore C: Program Files (Delta only - skip existing)
-            Write-Host "Restoring Apps..."
-            robocopy "$extractTemp\Prog" "C:\Program Files" /E /XJ /R:0 /W:0 /XX
-            robocopy "$extractTemp\Prog86" "C:\Program Files (x86)" /E /XJ /R:0 /W:0 /XX
-            robocopy "$extractTemp\ProgData" "C:\ProgramData" /E /XJ /R:0 /W:0 /XX
+            # Restore Program Files (Only inject new/modified files)
+            Write-Host "Injecting App Deltas..."
+            robocopy "$workDir\Prog" "C:\Program Files" /E /XJ /R:0 /W:0 /XO
+            robocopy "$workDir\Prog86" "C:\Program Files (x86)" /E /XJ /R:0 /W:0 /XO
+            robocopy "$workDir\ProgData" "C:\ProgramData" /E /XJ /R:0 /W:0 /XO
             
-            # Restore D: Drive
-            if (Test-Path "D:\") {
-                robocopy "$extractTemp\DriveD" "D:\" /E /XJ /R:0 /W:0
-            }
-
-            # Restore User Profile (Desktop, VSCode, etc.)
+            # Restore User Profile
             $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
             $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
             Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
             $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
-            robocopy "$extractTemp\User" $rdpPath /E /XJ /R:0 /W:0
-        } else {
-            Write-Host "ℹ️ No state.zip found. Starting fresh session."
+            robocopy "$workDir\User" $rdpPath /E /XJ /R:0 /W:0
+            
+            Write-Host "🔥 Deleting old cloud backup..."
+            rclone deletefile mydrive:rdp-backups/state.zip
+            Remove-Item $localZip -Force
         }
 
-        # --- PHASE 2: KEEP ALIVE & LOOP ---
+        # --- PHASE 2: KEEP ALIVE ---
         $start = Get-Date
         while ($true) {
           $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
           Write-Host "RDP Active | Time: $([math]::Round($elapsed, 2)) min"
 
-          if ($elapsed -ge 5) {
-            try {
-                Write-Host "⏳ Time limit reached. Starting Deep Backup..."
-                $packDir = "C:\to_pack"
-                New-Item $packDir -ItemType Directory -Force
-                
-                # 1. Grab User Profile
-                $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
-                robocopy $rdpPath "$packDir\User" /E /XJ /XD "AppData\Local\Temp" "AppData\Local\Microsoft\Windows" /R:0 /W:0
-                
-                # 2. Grab Program Deltas (Only newer/different files)
-                robocopy "C:\Program Files" "$packDir\Prog" /E /XJ /XO /R:0 /W:0
-                robocopy "C:\Program Files (x86)" "$packDir\Prog86" /E /XJ /XO /R:0 /W:0
-                robocopy "C:\ProgramData" "$packDir\ProgData" /E /XJ /XO /R:0 /W:0
-                
-                # 3. Grab D: Drive
-                if (Test-Path "D:\") {
-                    robocopy "D:\" "$packDir\DriveD" /E /XJ /R:0 /W:0
-                }
+          if ($elapsed -ge 330) {
+            Write-Host "⏳ 5.5 Hours reached. Preparing Deep Backup..."
+            $stage = "D:\to_pack"
+            if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+            New-Item $stage -ItemType Directory -Force
+            
+            # 1. Capture User Profile (Settings, VSCode Extensions)
+            $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
+            robocopy $rdpPath "$stage\User" /E /XJ /XD "AppData\Local\Temp" "AppData\Local\Microsoft\Windows" /R:0 /W:0
+            
+            # 2. Capture Program Deltas (Only things YOU installed)
+            # /XO ignores pre-installed GitHub junk
+            robocopy "C:\Program Files" "$stage\Prog" /E /XJ /XO /R:0 /W:0
+            robocopy "C:\Program Files (x86)" "$stage\Prog86" /E /XJ /XO /R:0 /W:0
+            robocopy "C:\ProgramData" "$stage\ProgData" /E /XJ /XO /R:0 /W:0
 
-                Write-Host "Zipping everything..."
-                Compress-Archive -Path "$packDir\*" -DestinationPath "C:\backups\state.zip" -Force
-                
-                Write-Host "Uploading to GDrive..."
-                rclone copy "C:\backups\state.zip" "mydrive:rdp-backups" --progress
-                
-                Write-Host "Triggering next workflow..."
-                $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"
-                Invoke-RestMethod -Uri $uri -Method POST -Headers @{
-                    Authorization = "token $env:GH_PAT"
-                    Accept = "application/vnd.github+json"
-                } -Body '{"ref":"main"}'
-                break
-            } catch {
-                Write-Host "Error during deep backup: $($_.Exception.Message)"
-                exit 1
-            }
+            Write-Host "Zipping on D: drive..."
+            Compress-Archive -Path "$stage\*" -DestinationPath "D:\state.zip" -Force
+            
+            Write-Host "Uploading..."
+            rclone copy "D:\state.zip" "mydrive:rdp-backups" --progress
+            
+            # Trigger next workflow
+            $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"
+            Invoke-RestMethod -Uri $uri -Method POST -Headers @{Authorization="token $env:GH_PAT"; Accept="application/vnd.github+json"} -Body '{"ref":"main"}'
+            break
           }
           Start-Sleep 300
         }
 
 #################################################################
-# 8️⃣ Final Notification (Status Update)
+# 8️⃣ Final Status
 #################################################################
     - name: Send Final Status to Telegram
       if: always()
@@ -220,13 +204,14 @@ jobs:
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
         $status = "${{ job.status }}"
-        $message = "🏁 <b>RDP Session Transitioned</b>`nStatus: <b>$status</b>`n`nDeep Backup (C: Delta + D:) complete. Next loop starting..."
+        $message = "🏁 <b>Session Transitioned</b>`nStatus: <b>$status</b>`n`nBackup uploaded. New RDP spinning up..."
         
         $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
         $body = @{
-            chat_id = $env:TELEGRAM_CHAT_ID;
-            text = $message;
+            chat_id = $env:TELEGRAM_CHAT_ID
+            text = $message
             parse_mode = "HTML"
         } | ConvertTo-Json
 
         Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
+        

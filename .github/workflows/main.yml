@@ -86,36 +86,6 @@ jobs:
         Test-NetConnection $env:TAILSCALE_IP -Port 3389
 
 #################################################################
-# 5.5️⃣ Send Credentials to Telegram (Fixed HTML Parsing)
-#################################################################
-    - name: Send Notification to Telegram
-      env:
-        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        RDP_PASS: ${{ env.RDP_CREDS }}
-        RDP_IP: ${{ env.TAILSCALE_IP }}
-      run: |
-        # Use HTML tags to prevent parsing errors with special characters in passwords
-        $message = @"
-        🚀 <b>New RDP Session Ready</b>
-
-        🌐 <b>IP:</b> <code>$($env:RDP_IP)</code>
-        👤 <b>User:</b> <code>RDP</code>
-        🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
-
-        <i>Session will auto-backup in 5.5 hours.</i>
-        "@
-        
-        $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
-        $body = @{
-            chat_id = $env:TELEGRAM_CHAT_ID
-            text = $message
-            parse_mode = "HTML"
-        } | ConvertTo-Json
-
-        Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
-
-#################################################################
 # 6️⃣ Install rclone
 #################################################################
     - name: Install rclone
@@ -125,7 +95,7 @@ jobs:
         Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
 #################################################################
-# 7️⃣ Restore & Lifecycle (Dynamic Profile Detection)
+# 7️⃣ Restore & Lifecycle (Self-Destruct Logic)
 #################################################################
     - name: Restore, Run, and Backup
       env:
@@ -133,71 +103,87 @@ jobs:
         RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
         GH_PAT: ${{ secrets.GH_PAT }}
         RDP_CREDS: ${{ env.RDP_CREDS }}
+        TAILSCALE_IP: ${{ env.TAILSCALE_IP }}
+        TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
         $backupDir = "C:\backups"
         if (!(Test-Path $backupDir)) { New-Item $backupDir -ItemType Directory -Force }
+        
+        # Function for Telegram Notifications
+        function Send-Telegram ($msg) {
+            $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
+            $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $msg; parse_mode = "HTML" } | ConvertTo-Json
+            Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body | Out-Null
+        }
 
         # --- RESTORE PHASE ---
-        Write-Host "Checking GDrive for rdp-backups/state.zip..."
+        Write-Host "Checking GDrive for state.zip..."
         $backupExists = rclone lsf mydrive:rdp-backups --max-depth 1 2>$null | Where-Object { $_ -match "state.zip" }
 
         if ($backupExists) {
             Write-Host "Backup found. Downloading..."
             rclone copy mydrive:rdp-backups $backupDir --progress
-
-            # 1️⃣ FORCE PROFILE CREATION
-            Write-Host "Triggering profile creation..."
+            
+            # 🔥 SELF DESTRUCT: Delete from cloud immediately after download
+            Write-Host "Self-destructing cloud backup to prevent duplicate restores..."
+            rclone deletefile mydrive:rdp-backups/state.zip
+            
+            # FORCE PROFILE CREATION
             $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
             $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
             Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job | Receive-Job
 
-            # 2️⃣ DYNAMIC DETECTION
             $activeRDPProfile = Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1
-
             if ($activeRDPProfile) {
                 $rdpPath = $activeRDPProfile.FullName
-                Write-Host "Detected Active Profile Folder: $rdpPath"
                 $extractTemp = "C:\extract_temp"
                 if (Test-Path $extractTemp) { Remove-Item $extractTemp -Recurse -Force }
                 New-Item $extractTemp -ItemType Directory -Force
-                Write-Host "Extracting and Moving files..."
                 Expand-Archive -Path "$backupDir\state.zip" -DestinationPath $extractTemp -Force
                 robocopy $extractTemp $rdpPath /E /XJ /R:0 /W:0 /NP /NFL /NDL
-                Write-Host "Session restored successfully to $rdpPath."
-                Remove-Item $extractTemp -Recurse -Force
-            } else {
-                Write-Host "Error: Could not find an active RDP user profile folder."
+                Write-Host "Session restored successfully."
+                Send-Telegram "🔄 <b>State Restored:</b> Previous backup downloaded and deleted from GDrive."
             }
-        } else {
-            Write-Host "No previous backup found. Starting fresh."
         }
+
+        # --- TELEGRAM: INITIAL LOGIN CREDENTIALS ---
+        $loginMsg = @"
+        🚀 <b>New RDP Session Ready</b>
+        🌐 <b>IP:</b> <code>$($env:TAILSCALE_IP)</code>
+        👤 <b>User:</b> <code>RDP</code>
+        🔑 <b>Pass:</b> <code>$($env:RDP_CREDS)</code>
+        "@
+        Send-Telegram $loginMsg
 
         # --- LIFECYCLE PHASE (KEEP ALIVE) ---
         $start = Get-Date
-        Write-Host "--- RDP SESSION ACTIVE ---"
-        Write-Host "User: RDP | Pass: $env:RDP_CREDS"
-
         while ($true) {
           $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
-          Write-Host "RDP Active | Time Elapsed: $([math]::Round($elapsed, 2)) min"
-
-          if ($elapsed -ge 5) {
-            Write-Host "Time limit reached. Backing up..."
-            $activeRDPProfile = Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1
-            $sourcePath = if ($activeRDPProfile) { $activeRDPProfile.FullName } else { "C:\Users\RDP" }
-            $tempDir = "C:\temp_out"
-            if (!(Test-Path $tempDir)) { New-Item $tempDir -ItemType Directory -Force }
-            Write-Host "Zipping profile: $sourcePath"
-            Compress-Archive -Path "$sourcePath\*" -DestinationPath "$tempDir\state.zip" -Force -ErrorAction SilentlyContinue
-            Write-Host "Uploading to Google Drive..."
-            rclone copy "$tempDir\state.zip" "mydrive:rdp-backups" --progress
-            Write-Host "Triggering next workflow..."
-            $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"
-            Invoke-RestMethod -Uri $uri -Method POST -Headers @{
-                Authorization = "token $env:GH_PAT"
-                Accept = "application/vnd.github+json"
-            } -Body '{"ref":"main"}'
-            break
+          if ($elapsed -ge 7) {
+            try {
+                Write-Host "Time limit reached. Backing up..."
+                $activeRDPProfile = Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1
+                $sourcePath = if ($activeRDPProfile) { $activeRDPProfile.FullName } else { "C:\Users\RDP" }
+                $tempDir = "C:\temp_out"
+                if (!(Test-Path $tempDir)) { New-Item $tempDir -ItemType Directory -Force }
+                
+                Compress-Archive -Path "$sourcePath\*" -DestinationPath "$tempDir\state.zip" -Force -ErrorAction SilentlyContinue
+                rclone copy "$tempDir\state.zip" "mydrive:rdp-backups" --progress
+                
+                Send-Telegram "✅ <b>Backup Successful:</b> RDP state uploaded. Triggering RDP-Next..."
+                
+                # Triggering next workflow
+                $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"
+                Invoke-RestMethod -Uri $uri -Method POST -Headers @{
+                    Authorization = "token $env:GH_PAT"
+                    Accept = "application/vnd.github+json"
+                } -Body '{"ref":"main"}'
+                break
+            } catch {
+                Send-Telegram "⚠️ <b>Backup Failed!</b> Error: $($_.Exception.Message)"
+                exit 1
+            }
           }
           Start-Sleep 300
         }

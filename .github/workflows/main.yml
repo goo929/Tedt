@@ -177,7 +177,7 @@ jobs:
           $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
           Write-Host "RDP Active | Time Elapsed: $([math]::Round($elapsed, 2)) min"
 
-          if ($elapsed -ge 330) {
+          if ($elapsed -ge 7) {
             Write-Host "Time limit reached. Backing up..."
             $activeRDPProfile = Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1
             $sourcePath = if ($activeRDPProfile) { $activeRDPProfile.FullName } else { "C:\Users\RDP" }

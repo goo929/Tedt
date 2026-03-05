@@ -95,7 +95,7 @@ jobs:
         👤 <b>User:</b> <code>RDP</code>
         🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
-        <i>Deep Persistence Active: C-Delta & D-Drive.</i>
+        <i>Deep Persistence Active: Registry, Apps & Profile.</i>
         "@
         
         $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
@@ -117,7 +117,7 @@ jobs:
         Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
 #################################################################
-# 7️⃣ Enhanced Persistence (Full Exclusion Lists)
+# 7️⃣ Enhanced Persistence (Full Exclusion Lists + Registry)
 #################################################################
     - name: Restore, Run, and Backup
       env:
@@ -135,16 +135,22 @@ jobs:
         $backupExists = rclone lsf mydrive:rdp-backups --max-depth 1 2>$null | Where-Object { $_ -match "state.zip" }
 
         if ($backupExists) {
-            Write-Host "✅ Found State. Restoring App Deltas..."
+            Write-Host "✅ Found State. Restoring..."
             rclone copy mydrive:rdp-backups/state.zip D:\ --progress
             Expand-Archive -Path $localZip -DestinationPath $workDir -Force
 
-            # Re-inject your custom apps back to C:
+            # 1. Restore Registry Settings
+            if (Test-Path "$workDir\user_settings.reg") {
+                Write-Host "Importing User Registry Settings..."
+                reg import "$workDir\user_settings.reg"
+            }
+
+            # 2. Re-inject custom apps back to C:
             robocopy "$workDir\Prog" "C:\Program Files" /E /XJ /R:0 /W:0 /XO
             robocopy "$workDir\Prog86" "C:\Program Files (x86)" /E /XJ /R:0 /W:0 /XO
             robocopy "$workDir\ProgData" "C:\ProgramData" /E /XJ /R:0 /W:0 /XO
             
-            # Restore User Profile
+            # 3. Restore User Profile
             $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
             robocopy "$workDir\User" $rdpPath /E /XJ /R:0 /W:0
             
@@ -165,20 +171,29 @@ jobs:
             if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
             New-Item $stage -ItemType Directory -Force
             
-            # 1. Capture User Profile
+            # 1. Export Registry Settings (The "Brain")
+            Write-Host "Exporting Registry Settings..."
+            reg export "HKEY_CURRENT_USER\Software" "$stage\user_settings.reg" /y
+            
+            # 2. Capture User Profile
             $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
             robocopy $rdpPath "$stage\User" /E /XJ /XD "AppData\Local\Temp" "AppData\Local\Microsoft\Windows" /R:0 /W:0
             
-            # 2. Program Files Exclusions
+            # 3. Define Exclusions (GitHub Pre-installed Junk)
             $exclude = @("7-Zip","Amazon","Android","Application Verifier","Azure Cosmos DB Emulator","CMake","Common Files","dotnet","Git","GitHub CLI","Google","Hyper-V","IIS","IIS Express","ImageMagick*","Internet Explorer","LLVM","Microsoft*","MongoDB","mongosh","Mozilla Firefox","MySQL","PostgreSQL","R","Unity Hub","MSBuild","nodejs","OpenSSL","PackageManagement","PowerShell","Reference Assemblies","Windows Defender","Windows NT","WindowsApps","WindowsPowerShell","WSL")
             $exclude86 = @("Android","Application Verifier","Common Files","dotnet","Google","HTML Help Workshop","IIS","IIS Express","Inno Setup 6","Internet Explorer","Microsoft*","MSBuild","Nuget","Open XML SDK","pipx","pipx_bin","Reference Assemblies","sbt","Visual Studio","Windows Application Driver","Windows Defender","Windows Kits","Windows Mail","Windows Media Player","Windows NT","Windows Photo Viewer","Windows Sidebar","WindowsPowerShell","WiX Toolset*","Workflow Manager Tools")
 
-            $xdArgs = $exclude | ForEach-Object { "/XD `"C:\Program Files\$_`"" }
-            $xdArgs86 = $exclude86 | ForEach-Object { "/XD `"C:\Program Files (x86)\$_`"" }
+            $xdString = ($exclude | ForEach-Object { "/XD `"C:\Program Files\$_`"" }) -join " "
+            $xdString86 = ($exclude86 | ForEach-Object { "/XD `"C:\Program Files (x86)\$_`"" }) -join " "
 
-            # 3. Filtered Robocopy
-            Invoke-Expression "robocopy `"C:\Program Files`" `"$stage\Prog`" /E /XJ /R:0 /W:0 $xdArgs"
-            Invoke-Expression "robocopy `"C:\Program Files (x86)`" `"$stage\Prog86`" /E /XJ /R:0 /W:0 $xdArgs86"
+            # 4. Filtered Robocopy
+            Write-Host "Backing up Program Files (Filtered)..."
+            Start-Process robocopy -ArgumentList "`"C:\Program Files`" `"$stage\Prog`" /E /XJ /R:0 /W:0 $xdString" -Wait -NoNewWindow
+            
+            Write-Host "Backing up Program Files (x86) (Filtered)..."
+            Start-Process robocopy -ArgumentList "`"C:\Program Files (x86)`" `"$stage\Prog86`" /E /XJ /R:0 /W:0 $xdString86" -Wait -NoNewWindow
+            
+            Write-Host "Backing up ProgramData..."
             robocopy "C:\ProgramData" "$stage\ProgData" /E /XJ /XO /R:0 /W:0
 
             Write-Host "Zipping on D: drive..."

@@ -169,7 +169,7 @@ jobs:
           $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
           Write-Host "RDP Active | Time: $([math]::Round($elapsed, 2)) min"
 
-          if ($elapsed -ge 330) {
+          if ($elapsed -ge 5) {
             try {
                 Write-Host "⏳ Time limit reached. Starting Deep Backup..."
                 $packDir = "C:\to_pack"

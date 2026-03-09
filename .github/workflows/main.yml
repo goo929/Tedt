@@ -34,7 +34,6 @@ jobs:
             Upper   = [char[]](65..90)
             Lower   = [char[]](97..122)
             Number  = [char[]](48..57)
-            # Removed < and > to prevent Telegram HTML parsing errors
             Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126) | Where-Object {$_ -notin 60, 62})
         }
         $rawPassword = @()
@@ -79,7 +78,7 @@ jobs:
         echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
 
 #################################################################
-# 5️⃣ Send Credentials to Telegram (Fixed HTML Parsing)
+# 5️⃣ Send Credentials to Telegram
 #################################################################
     - name: Send Notification to Telegram
       env:
@@ -88,9 +87,7 @@ jobs:
         RDP_PASS: ${{ env.RDP_CREDS }}
         RDP_IP: ${{ env.TAILSCALE_IP }}
       run: |
-        # Escape special characters for Telegram HTML
         $SafePass = $env:RDP_PASS.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;')
-        
         $message = @"
         🚀 <b>New RDP Session Ready</b>
 
@@ -100,14 +97,8 @@ jobs:
 
         <i>Deep Persistence Active: Registry, Apps & Profile.</i>
         "@
-        
         $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
-        $body = @{
-            chat_id = $env:TELEGRAM_CHAT_ID
-            text = $message
-            parse_mode = "HTML"
-        } | ConvertTo-Json
-
+        $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json
         Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
 
 #################################################################
@@ -120,7 +111,7 @@ jobs:
         Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
 #################################################################
-# 7️⃣ Enhanced Persistence (Full Exclusion Lists + Registry)
+# 7️⃣ Enhanced Persistence (Restoration & Automatic Backup)
 #################################################################
     - name: Restore, Run, and Backup
       env:
@@ -134,29 +125,33 @@ jobs:
         if (!(Test-Path $workDir)) { New-Item $workDir -ItemType Directory -Force }
 
         # --- PHASE 1: RESTORE ---
-        Write-Host "Checking GDrive for state.zip..."
         $backupExists = rclone lsf mydrive:rdp-backups --max-depth 1 2>$null | Where-Object { $_ -match "state.zip" }
 
         if ($backupExists) {
-            Write-Host "✅ Found State. Restoring..."
+            Write-Host "✅ Restoring State..."
             rclone copy mydrive:rdp-backups/state.zip D:\ --progress
             Expand-Archive -Path $localZip -DestinationPath $workDir -Force
 
             $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
             $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
             Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
-
             $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
 
-            if (Test-Path "$workDir\user_settings.reg") { reg import "$workDir\user_settings.reg" }
+            # Restore Files
             if (Test-Path "$workDir\Prog") { robocopy "$workDir\Prog" "C:\Program Files" /E /XJ /R:0 /W:0 /XO }
             if (Test-Path "$workDir\Prog86") { robocopy "$workDir\Prog86" "C:\Program Files (x86)" /E /XJ /R:0 /W:0 /XO }
             if (Test-Path "$workDir\ProgData") { robocopy "$workDir\ProgData" "C:\ProgramData" /E /XJ /R:0 /W:0 /XO }
             if (Test-Path "$workDir\User") { robocopy "$workDir\User" $rdpPath /E /XJ /R:0 /W:0 }
+            if (Test-Path "$workDir\user_settings.reg") { reg import "$workDir\user_settings.reg" }
 
-            # --- SHORTCUT REPAIR ---
+            # --- REPAIR SHORTCUTS & REFRESH PATH ---
+            Write-Host "🔧 Fixing Links & Environment..."
             $wsh = New-Object -ComObject WScript.Shell
-            $shPaths = @("$rdpPath\Desktop", "$rdpPath\AppData\Roaming\Microsoft\Windows\Start Menu\Programs")
+            $shPaths = @("$rdpPath\Desktop", "$rdpPath\AppData\Roaming\Microsoft\Windows\Start Menu\Programs", "C:\Users\Public\Desktop")
+            
+            # Refresh Path for Terminal sessions
+            $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+
             Get-ChildItem -Path $shPaths -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
                 try {
                     $lnk = $wsh.CreateShortcut($_.FullName)
@@ -164,6 +159,11 @@ jobs:
                 } catch {}
             }
             
+            # Flush Icon Cache
+            $code = '[DllImport("shell32.dll")] public static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);'
+            Add-Type -MemberDefinition $code -Name "ShellUtil" -Namespace "ShellHelpers"
+            [ShellHelpers.ShellUtil]::SHChangeNotify(0x08000000, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero)
+
             rclone deletefile mydrive:rdp-backups/state.zip
             Remove-Item $localZip -Force
         }
@@ -174,14 +174,25 @@ jobs:
           $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
           Write-Host "RDP Active | Time: $([math]::Round($elapsed, 2)) min"
 
-          if ($elapsed -ge 5) {
+          if ($elapsed -ge 330) {
+            Write-Host "⏳ Packing Backup..."
             $stage = "D:\to_pack"
             if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
             New-Item $stage -ItemType Directory -Force
+            
             reg export "HKEY_CURRENT_USER\Software" "$stage\user_settings.reg" /y
             $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
-            robocopy $rdpPath "$stage\User" /E /XJ /XD "AppData\Local\Temp" "AppData\Local\Microsoft\Windows" "AppData\Local\History" /R:0 /W:0
             
+            # Backup Profile (Preserve AppData/Local/Android and others)
+            robocopy $rdpPath "$stage\User" /E /XJ /XD "AppData\Local\Temp" "AppData\Local\History" /R:0 /W:0
+            
+            # Backup Program Files (Selective exclusion to keep dev tools)
+            $exclude = @("7-Zip","Amazon","Azure*","CMake","dotnet","Git*","Google","IIS*","Microsoft*","PostgreSQL","Windows*")
+            $xdString = ($exclude | ForEach-Object { "/XD `"C:\Program Files\$_`"" }) -join " "
+            
+            Start-Process robocopy -ArgumentList "`"C:\Program Files`" `"$stage\Prog`" /E /XJ /R:0 /W:0 $xdString" -Wait -NoNewWindow
+            robocopy "C:\ProgramData" "$stage\ProgData" /E /XJ /XO /R:0 /W:0
+
             Compress-Archive -Path "$stage\*" -DestinationPath "D:\state.zip" -Force
             rclone copy "D:\state.zip" "mydrive:rdp-backups" --progress
             
@@ -193,7 +204,7 @@ jobs:
         }
 
 #################################################################
-# 8️⃣ Final Status (Fixed PowerShell Syntax)
+# 8️⃣ Final Status
 #################################################################
     - name: Send Final Status to Telegram
       if: always()

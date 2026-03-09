@@ -95,7 +95,7 @@ jobs:
         👤 <b>User:</b> <code>RDP</code>
         🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
-        <i>Deep Persistence: Auto-fixing registry paths...</i>
+        <i>Deep Persistence Active.</i>
         "@
         
         $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
@@ -144,23 +144,18 @@ jobs:
             $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
             Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
 
-            # B. Identify the EXACT Profile path (handles RDP.000 suffixes)
+            # B. Identify exact Profile path
             $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-            Write-Host "Target Profile: $rdpPath"
 
-            # C. Restore System Folders
+            # C. Restore Folders
             if (Test-Path "$workDir\Prog") { robocopy "$workDir\Prog" "C:\Program Files" /E /XJ /R:0 /W:0 /XO }
             if (Test-Path "$workDir\Prog86") { robocopy "$workDir\Prog86" "C:\Program Files (x86)" /E /XJ /R:0 /W:0 /XO }
             if (Test-Path "$workDir\ProgData") { robocopy "$workDir\ProgData" "C:\ProgramData" /E /XJ /R:0 /W:0 /XO }
-            
-            # D. Restore User Profile (MT:16 speeds up small file copy)
             if (Test-Path "$workDir\User") { robocopy "$workDir\User" $rdpPath /E /XJ /R:0 /W:0 /MT:16 }
 
-            # E. Registry Path Fixer (Fixes broken Proton/App shortcuts)
+            # D. Registry Path Fixer
             if (Test-Path "$workDir\user_settings.reg") {
-                Write-Host "Fixing Registry file paths..."
                 $regContent = Get-Content "$workDir\user_settings.reg" -Raw
-                # Detect the old profile path from the reg file and replace with current
                 if ($regContent -match "C:\\\\Users\\\\[^\\\\]+") {
                     $oldPathReg = $matches[0]
                     $newPathReg = $rdpPath.Replace('\','\\')
@@ -176,14 +171,13 @@ jobs:
             Remove-Item $localZip -Force
         }
 
-        # --- PHASE 2: KEEP ALIVE & FILTERED BACKUP ---
+        # --- PHASE 2: KEEP ALIVE ---
         $start = Get-Date
         while ($true) {
           $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
           Write-Host "RDP Active | Time: $([math]::Round($elapsed, 2)) min"
 
-          if ($elapsed -ge 5) {
-            Write-Host "⏳ Time reached. Starting Filtered Backup..."
+          if ($elapsed -ge 330) {
             $stage = "D:\to_pack"
             if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
             New-Item $stage -ItemType Directory -Force

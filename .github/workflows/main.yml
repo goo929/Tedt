@@ -95,7 +95,7 @@ jobs:
         👤 <b>User:</b> <code>RDP</code>
         🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
-        <i>Deep Persistence Active: Registry, Apps & Profile.</i>
+        <i>Deep Persistence: Auto-fixing registry paths...</i>
         "@
         
         $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
@@ -117,7 +117,7 @@ jobs:
         Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"
 
 #################################################################
-# 7️⃣ Enhanced Persistence (Full Exclusion Lists + Registry)
+# 7️⃣ Enhanced Persistence (Full Exclusion Lists + Path Fixer)
 #################################################################
     - name: Restore, Run, and Backup
       env:
@@ -135,30 +135,42 @@ jobs:
         $backupExists = rclone lsf mydrive:rdp-backups --max-depth 1 2>$null | Where-Object { $_ -match "state.zip" }
 
         if ($backupExists) {
-            Write-Host "✅ Found State. Restoring..."
+            Write-Host "✅ Found State. Downloading..."
             rclone copy mydrive:rdp-backups/state.zip D:\ --progress
             Expand-Archive -Path $localZip -DestinationPath $workDir -Force
 
-            # A. Trigger Profile Creation so C:\Users\RDP exists
+            # A. Trigger Profile Creation
             $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
             $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
             Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
 
-            # B. Identify the User folder
-            $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
+            # B. Identify the EXACT Profile path (handles RDP.000 suffixes)
+            $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
+            Write-Host "Target Profile: $rdpPath"
 
-            # C. Restore Registry
-            if (Test-Path "$workDir\user_settings.reg") {
-                reg import "$workDir\user_settings.reg"
-            }
-
-            # D. Restore Program Files
+            # C. Restore System Folders
             if (Test-Path "$workDir\Prog") { robocopy "$workDir\Prog" "C:\Program Files" /E /XJ /R:0 /W:0 /XO }
             if (Test-Path "$workDir\Prog86") { robocopy "$workDir\Prog86" "C:\Program Files (x86)" /E /XJ /R:0 /W:0 /XO }
             if (Test-Path "$workDir\ProgData") { robocopy "$workDir\ProgData" "C:\ProgramData" /E /XJ /R:0 /W:0 /XO }
             
-            # E. Restore User Profile
-            if (Test-Path "$workDir\User") { robocopy "$workDir\User" $rdpPath /E /XJ /R:0 /W:0 }
+            # D. Restore User Profile (MT:16 speeds up small file copy)
+            if (Test-Path "$workDir\User") { robocopy "$workDir\User" $rdpPath /E /XJ /R:0 /W:0 /MT:16 }
+
+            # E. Registry Path Fixer (Fixes broken Proton/App shortcuts)
+            if (Test-Path "$workDir\user_settings.reg") {
+                Write-Host "Fixing Registry file paths..."
+                $regContent = Get-Content "$workDir\user_settings.reg" -Raw
+                # Detect the old profile path from the reg file and replace with current
+                if ($regContent -match "C:\\\\Users\\\\[^\\\\]+") {
+                    $oldPathReg = $matches[0]
+                    $newPathReg = $rdpPath.Replace('\','\\')
+                    $regContent = $regContent -replace [regex]::Escape($oldPathReg), $newPathReg
+                    $regContent | Set-Content "$workDir\fixed_settings.reg"
+                    reg import "$workDir\fixed_settings.reg"
+                } else {
+                    reg import "$workDir\user_settings.reg"
+                }
+            }
             
             rclone deletefile mydrive:rdp-backups/state.zip
             Remove-Item $localZip -Force
@@ -170,7 +182,7 @@ jobs:
           $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
           Write-Host "RDP Active | Time: $([math]::Round($elapsed, 2)) min"
 
-          if ($elapsed -ge 330) {
+          if ($elapsed -ge 5) {
             Write-Host "⏳ Time reached. Starting Filtered Backup..."
             $stage = "D:\to_pack"
             if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
@@ -178,7 +190,7 @@ jobs:
             
             reg export "HKEY_CURRENT_USER\Software" "$stage\user_settings.reg" /y
             
-            $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
+            $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
             robocopy $rdpPath "$stage\User" /E /XJ /XD "AppData\Local\Temp" "AppData\Local\Microsoft\Windows" /R:0 /W:0
             
             $exclude = @("7-Zip","Amazon","Android","Application Verifier","Azure Cosmos DB Emulator","CMake","Common Files","dotnet","Git","GitHub CLI","Google","Hyper-V","IIS","IIS Express","ImageMagick*","Internet Explorer","LLVM","Microsoft*","MongoDB","mongosh","Mozilla Firefox","MySQL","PostgreSQL","R","Unity Hub","MSBuild","nodejs","OpenSSL","PackageManagement","PowerShell","Reference Assemblies","Windows Defender","Windows NT","WindowsApps","WindowsPowerShell","WSL")

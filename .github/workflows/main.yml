@@ -34,7 +34,8 @@ jobs:
             Upper   = [char[]](65..90)
             Lower   = [char[]](97..122)
             Number  = [char[]](48..57)
-            Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126))
+            # Removed < and > to prevent Telegram HTML parsing errors
+            Special = ([char[]](33..47) + [char[]](58..64) + [char[]](91..96) + [char[]](123..126) | Where-Object {$_ -notin 60, 62})
         }
         $rawPassword = @()
         $rawPassword += $charSet.Upper | Get-Random -Count 4
@@ -78,7 +79,7 @@ jobs:
         echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV
 
 #################################################################
-# 5️⃣ Send Credentials to Telegram
+# 5️⃣ Send Credentials to Telegram (Fixed HTML Parsing)
 #################################################################
     - name: Send Notification to Telegram
       env:
@@ -87,12 +88,15 @@ jobs:
         RDP_PASS: ${{ env.RDP_CREDS }}
         RDP_IP: ${{ env.TAILSCALE_IP }}
       run: |
+        # Escape special characters for Telegram HTML
+        $SafePass = $env:RDP_PASS.Replace('&', '&amp;').Replace('<', '&lt;').Replace('>', '&gt;')
+        
         $message = @"
         🚀 <b>New RDP Session Ready</b>
 
         🌐 <b>IP:</b> <code>$($env:RDP_IP)</code>
         👤 <b>User:</b> <code>RDP</code>
-        🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
+        🔑 <b>Pass:</b> <code>$SafePass</code>
 
         <i>Deep Persistence Active: Registry, Apps & Profile.</i>
         "@
@@ -138,24 +142,19 @@ jobs:
             rclone copy mydrive:rdp-backups/state.zip D:\ --progress
             Expand-Archive -Path $localZip -DestinationPath $workDir -Force
 
-            # A. Trigger Profile Creation
             $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
             $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
             Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
 
             $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
 
-            # B. Restore Registry
             if (Test-Path "$workDir\user_settings.reg") { reg import "$workDir\user_settings.reg" }
-
-            # C. Restore Program Files & Data
             if (Test-Path "$workDir\Prog") { robocopy "$workDir\Prog" "C:\Program Files" /E /XJ /R:0 /W:0 /XO }
             if (Test-Path "$workDir\Prog86") { robocopy "$workDir\Prog86" "C:\Program Files (x86)" /E /XJ /R:0 /W:0 /XO }
             if (Test-Path "$workDir\ProgData") { robocopy "$workDir\ProgData" "C:\ProgramData" /E /XJ /R:0 /W:0 /XO }
             if (Test-Path "$workDir\User") { robocopy "$workDir\User" $rdpPath /E /XJ /R:0 /W:0 }
 
-            # D. FIX SHORTCUTS (The "Item Moved" Fix)
-            Write-Host "🔧 Repairing Shortcuts..."
+            # --- SHORTCUT REPAIR ---
             $wsh = New-Object -ComObject WScript.Shell
             $shPaths = @("$rdpPath\Desktop", "$rdpPath\AppData\Roaming\Microsoft\Windows\Start Menu\Programs")
             Get-ChildItem -Path $shPaths -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
@@ -165,44 +164,24 @@ jobs:
                 } catch {}
             }
             
-            # Refresh System Icon Cache
-            $code = '[DllImport("shell32.dll")] public static extern void SHChangeNotify(uint wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);'
-            $type = Add-Type -MemberDefinition $code -Name "ShellUtil" -Namespace "ShellHelpers" -PassThru
-            $type::SHChangeNotify(0x08000000, 0x0000, [IntPtr]::Zero, [IntPtr]::Zero)
-
             rclone deletefile mydrive:rdp-backups/state.zip
             Remove-Item $localZip -Force
         }
 
-        # --- PHASE 2: KEEP ALIVE & FILTERED BACKUP ---
+        # --- PHASE 2: KEEP ALIVE & BACKUP ---
         $start = Get-Date
         while ($true) {
           $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
           Write-Host "RDP Active | Time: $([math]::Round($elapsed, 2)) min"
 
           if ($elapsed -ge 330) {
-            Write-Host "⏳ Starting Filtered Backup..."
             $stage = "D:\to_pack"
             if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
             New-Item $stage -ItemType Directory -Force
-            
             reg export "HKEY_CURRENT_USER\Software" "$stage\user_settings.reg" /y
-            
             $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
-            
-            # Backup User Profile (Excluding only system-specific Windows bloat)
             robocopy $rdpPath "$stage\User" /E /XJ /XD "AppData\Local\Temp" "AppData\Local\Microsoft\Windows" "AppData\Local\History" /R:0 /W:0
             
-            $exclude = @("7-Zip","Amazon","Android","Application Verifier","Azure Cosmos DB Emulator","CMake","Common Files","dotnet","Git","GitHub CLI","Google","Hyper-V","IIS","IIS Express","ImageMagick*","Internet Explorer","LLVM","Microsoft*","MongoDB","mongosh","Mozilla Firefox","MySQL","PostgreSQL","R","Unity Hub","MSBuild","nodejs","OpenSSL","PackageManagement","PowerShell","Reference Assemblies","Windows Defender","Windows NT","WindowsApps","WindowsPowerShell","WSL")
-            $exclude86 = @("Android","Application Verifier","Common Files","dotnet","Google","HTML Help Workshop","IIS","IIS Express","Inno Setup 6","Internet Explorer","Microsoft*","MSBuild","Nuget","Open XML SDK","pipx","pipx_bin","Reference Assemblies","sbt","Visual Studio","Windows Application Driver","Windows Defender","Windows Kits","Windows Mail","Windows Media Player","Windows NT","Windows Photo Viewer","Windows Sidebar","WindowsPowerShell","WiX Toolset*","Workflow Manager Tools")
-
-            $xdString = ($exclude | ForEach-Object { "/XD `"C:\Program Files\$_`"" }) -join " "
-            $xdString86 = ($exclude86 | ForEach-Object { "/XD `"C:\Program Files (x86)\$_`"" }) -join " "
-
-            Start-Process robocopy -ArgumentList "`"C:\Program Files`" `"$stage\Prog`" /E /XJ /R:0 /W:0 $xdString" -Wait -NoNewWindow
-            Start-Process robocopy -ArgumentList "`"C:\Program Files (x86)`" `"$stage\Prog86`" /E /XJ /R:0 /W:0 $xdString86" -Wait -NoNewWindow
-            robocopy "C:\ProgramData" "$stage\ProgData" /E /XJ /XO /R:0 /W:0
-
             Compress-Archive -Path "$stage\*" -DestinationPath "D:\state.zip" -Force
             rclone copy "D:\state.zip" "mydrive:rdp-backups" --progress
             
@@ -214,7 +193,7 @@ jobs:
         }
 
 #################################################################
-# 8️⃣ Final Status
+# 8️⃣ Final Status (Fixed PowerShell Syntax)
 #################################################################
     - name: Send Final Status to Telegram
       if: always()
@@ -222,9 +201,9 @@ jobs:
         TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       run: |
-        $status = "${{ job.status }}"
-        $message = "🏁 <b>Session Transitioned</b>`nStatus: <b>$status</b>"
+        $statusStr = "${{ job.status }}"
+        $message = "🏁 <b>Session Transitioned</b>`nStatus: <b>$statusStr</b>"
         $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
         $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json
         Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
-        a
+        

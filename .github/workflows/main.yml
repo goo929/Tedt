@@ -174,7 +174,7 @@ jobs:
           $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
           Write-Host "RDP Active | Time: $([math]::Round($elapsed, 2)) min"
 
-          if ($elapsed -ge 330) {
+          if ($elapsed -ge 5) {
             Write-Host "⏳ Packing Backup..."
             $stage = "D:\to_pack"
             if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }

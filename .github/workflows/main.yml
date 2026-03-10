@@ -94,7 +94,7 @@ jobs:
           👤 <b>User:</b> <code>RDP</code>
           🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
-          <i>Apps will auto-restore in a terminal window upon login.</i>
+          <i>A terminal window will restore your apps upon login.</i>
           "@
           $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"      
           $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json      
@@ -110,7 +110,7 @@ jobs:
           Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"    
 
       #################################################################    
-      # 7️⃣ Universal Persistence (MODIFIED: GDrive Trash & Winget Fix)    
+      # 7️⃣ Universal Persistence (FIXED RCLONE & WINGET)    
       #################################################################    
       - name: Restore, Run, and Backup    
         env:    
@@ -124,38 +124,38 @@ jobs:
           if (!(Test-Path $workDir)) { New-Item $workDir -ItemType Directory -Force }
 
           # --- PHASE 1: RESTORE ---
-          rclone copy mydrive:rdp-backups/state.zip D:\ --progress
+          Write-Host "🔍 Searching GDrive for state..." -ForegroundColor Yellow
+          # Check for the file without the specific folder path first to avoid "directory not found"
+          rclone copy mydrive:state.zip D:\ --progress --error-on-no-transfer || rclone copy "mydrive:rdp-backups/state.zip" D:\ --progress
+
           if (Test-Path $localZip) {
               Expand-Archive -Path $localZip -DestinationPath $workDir -Force
-              
-              # UPDATED: Move to GDrive Bin (Trash) instead of permanent deletion
-              rclone delete mydrive:rdp-backups/state.zip --drive-use-trash=true
+              rclone delete mydrive:state.zip --drive-use-trash=true 2>$null
+              rclone delete "mydrive:rdp-backups/state.zip" --drive-use-trash=true 2>$null
 
               # A. Trigger Profile Creation  
               $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
               $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
               Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
-              Start-Sleep 5
                 
               $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
 
               # B. Sync User Files
               if (Test-Path "$workDir\User") {
-                  $excludeFiles = @("NTUSER.DAT*", "ntuser.ini", "usrClass.dat*")
-                  robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 /MT:16 /NP /XF $excludeFiles
+                  robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 /MT:16 /NP /XF "NTUSER.DAT*" "ntuser.ini"
               }
 
-              # C. ONE-FILE STARTUP FIX (UPDATED WINGET LOGIC)
+              # C. STARTUP BAT (Fixed Winget Interaction)
               $startupFolder = "$rdpPath\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
               if (!(Test-Path $startupFolder)) { New-Item $startupFolder -ItemType Directory -Force }
               
               $batContent = @"
           @echo off
           echo 🚀 Restoring Environment...
-          echo 🛠 Initializing Winget and Registry...
-          :: Reset winget source and force import apps
+          echo 🛠 Initializing Winget (Please wait)...
+          :: Force winget to accept agreements automatically to prevent 'Error reading input'
           powershell -ExecutionPolicy Bypass -Command "winget source reset --force; if (Test-Path '$workDir\user_settings.reg') { reg import '$workDir\user_settings.reg' }; if (Test-Path '$workDir\apps.json') { winget import --import-file '$workDir\apps.json' --accept-package-agreements --accept-source-agreements --ignore-unavailable }"
-          echo ✅ Restoration sequence complete.
+          echo ✅ Restoration Complete.
           pause
           del "%~f0"
           "@
@@ -166,17 +166,18 @@ jobs:
           $start = Get-Date
           while ($true) {
             $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
-            if ($elapsed -ge 5) {
+            Write-Host "RDP Active | Time: $elapsed min"
+            if ($elapsed -ge 330) {
               $stage = "D:\to_pack"
               if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
               New-Item $stage -ItemType Directory -Force
 
-              winget export --output "$stage\apps.json"
+              # Export with agreement bypass
+              winget export --output "$stage\apps.json" --accept-source-agreements
               reg export "HKEY_CURRENT_USER\Software" "$stage\user_settings.reg" /y
 
               $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
-              $excludeDirs = @("AppData\Local\Temp", "AppData\Local\Microsoft\Windows")
-              robocopy "$rdpPath" "$stage\User" /E /XJ /R:0 /W:0 /XD ($excludeDirs | ForEach-Object { "$rdpPath\$_" }) /XF "NTUSER.DAT*" "ntuser.ini"
+              robocopy "$rdpPath" "$stage\User" /E /XJ /R:0 /W:0 /XD "$rdpPath\AppData\Local\Temp" "$rdpPath\AppData\Local\Microsoft\Windows" /XF "NTUSER.DAT*" "ntuser.ini"
 
               Compress-Archive -Path "$stage\*" -DestinationPath "D:\state.zip" -Force
               rclone copy "D:\state.zip" "mydrive:rdp-backups" --progress

@@ -110,7 +110,7 @@ jobs:
           Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"    
 
       #################################################################    
-      # 7️⃣ Universal Persistence (FIXED RCLONE & WINGET)    
+      # 7️⃣ Universal Persistence (SILENT FAIL & AUTO-YES)    
       #################################################################    
       - name: Restore, Run, and Backup    
         env:    
@@ -124,55 +124,66 @@ jobs:
           if (!(Test-Path $workDir)) { New-Item $workDir -ItemType Directory -Force }
 
           # --- PHASE 1: RESTORE ---
-          Write-Host "🔍 Searching GDrive for state..." -ForegroundColor Yellow
-          # Check for the file without the specific folder path first to avoid "directory not found"
-          rclone copy mydrive:state.zip D:\ --progress --error-on-no-transfer || rclone copy "mydrive:rdp-backups/state.zip" D:\ --progress
-
-          if (Test-Path $localZip) {
+          Write-Host "🔍 Checking GDrive for state..." -ForegroundColor Yellow
+          
+          # We use 'lsf' to check if the file exists without throwing a directory error
+          $exists = rclone lsf mydrive:rdp-backups/state.zip 2>$null
+          
+          if ($exists) {
+              Write-Host "📦 State found! Downloading..." -ForegroundColor Green
+              rclone copy mydrive:rdp-backups/state.zip D:\ --progress
               Expand-Archive -Path $localZip -DestinationPath $workDir -Force
-              rclone delete mydrive:state.zip --drive-use-trash=true 2>$null
-              rclone delete "mydrive:rdp-backups/state.zip" --drive-use-trash=true 2>$null
-
-              # A. Trigger Profile Creation  
-              $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
-              $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
-              Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
-                
-              $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
-
-              # B. Sync User Files
-              if (Test-Path "$workDir\User") {
-                  robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 /MT:16 /NP /XF "NTUSER.DAT*" "ntuser.ini"
-              }
-
-              # C. STARTUP BAT (Fixed Winget Interaction)
-              $startupFolder = "$rdpPath\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
-              if (!(Test-Path $startupFolder)) { New-Item $startupFolder -ItemType Directory -Force }
               
-              $batContent = @"
+              # Move to Bin (Trash)
+              rclone delete mydrive:rdp-backups/state.zip --drive-use-trash=true
+          } else {
+              Write-Host "⚠️ No state.zip found. Starting with default settings." -ForegroundColor Cyan
+          }
+
+          # A. Trigger Profile Creation  
+          $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
+          $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
+          Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
+            
+          $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
+
+          # B. Sync User Files (Only if state existed)
+          if (Test-Path "$workDir\User") {
+              robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 /MT:16 /NP /XF "NTUSER.DAT*" "ntuser.ini"
+          }
+
+          # C. STARTUP BAT (Fixed Winget 'YES' prompts)
+          $startupFolder = "$rdpPath\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
+          if (!(Test-Path $startupFolder)) { New-Item $startupFolder -ItemType Directory -Force }
+          
+          $batContent = @"
           @echo off
           echo 🚀 Restoring Environment...
-          echo 🛠 Initializing Winget (Please wait)...
-          :: Force winget to accept agreements automatically to prevent 'Error reading input'
+          echo 🛠 Initializing Winget (Auto-accepting agreements)...
+          :: The --accept-source-agreements and --accept-package-agreements flags handle the 'YES' prompts
           powershell -ExecutionPolicy Bypass -Command "winget source reset --force; if (Test-Path '$workDir\user_settings.reg') { reg import '$workDir\user_settings.reg' }; if (Test-Path '$workDir\apps.json') { winget import --import-file '$workDir\apps.json' --accept-package-agreements --accept-source-agreements --ignore-unavailable }"
           echo ✅ Restoration Complete.
           pause
           del "%~f0"
           "@
-              $batContent | Out-File "$startupFolder\restore.bat" -Encoding ascii
-          }
+          $batContent | Out-File "$startupFolder\restore.bat" -Encoding ascii
 
           # --- PHASE 2: MONITOR & BACKUP ---
           $start = Get-Date
+          $lastLog = 0
           while ($true) {
-            $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
-            Write-Host "RDP Active | Time: $elapsed min"
-            if ($elapsed -ge 330) {
+            $elapsed = [math]::Floor((New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes)
+            if ($elapsed -ne $lastLog) {
+                Write-Host "RDP Active | Time: $elapsed min"
+                $lastLog = $elapsed
+            }
+            
+            if ($elapsed -ge 5) {
               $stage = "D:\to_pack"
               if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
               New-Item $stage -ItemType Directory -Force
 
-              # Export with agreement bypass
+              # Export settings (Auto-accepting agreements here too)
               winget export --output "$stage\apps.json" --accept-source-agreements
               reg export "HKEY_CURRENT_USER\Software" "$stage\user_settings.reg" /y
 
@@ -186,7 +197,7 @@ jobs:
               Invoke-RestMethod -Uri $uri -Method POST -Headers @{Authorization="token $env:GH_PAT"; Accept="application/vnd.github+json"} -Body '{"ref":"main"}'
               break
             }
-            Start-Sleep 300
+            Start-Sleep 60
           }
 
       #################################################################    

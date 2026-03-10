@@ -166,7 +166,7 @@ jobs:
           $start = Get-Date
           while ($true) {
             $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
-            if ($elapsed -ge 5a) {
+            if ($elapsed -ge 5) {
               $stage = "D:\to_pack"
               if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
               New-Item $stage -ItemType Directory -Force

@@ -110,7 +110,7 @@ jobs:
           Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"    
 
       #################################################################    
-      # 7️⃣ Universal Persistence (Fixed Quoting & Cleanup)    
+      # 7️⃣ Universal Persistence (Robust One-File Fix)    
       #################################################################    
       - name: Restore, Run, and Backup    
         env:    
@@ -127,14 +127,13 @@ jobs:
           rclone copy mydrive:rdp-backups/state.zip D:\ --progress
           if (Test-Path $localZip) {
               Expand-Archive -Path $localZip -DestinationPath $workDir -Force
-              
-              # Cleanup Google Drive immediately after download
               rclone delete mydrive:rdp-backups/state.zip --drive-use-trash=false
 
               # A. Trigger Profile Creation  
               $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
               $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
               Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
+              Start-Sleep 5
                 
               $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
 
@@ -144,30 +143,25 @@ jobs:
                   robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 /MT:16 /NP /XF $excludeFiles
               }
 
-              # C. STARTUP INJECTION (Fixed Quoting for Spaces)
+              # C. ONE-FILE STARTUP FIX (No separate PS1 file)
               $startupFolder = "$rdpPath\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
               if (!(Test-Path $startupFolder)) { New-Item $startupFolder -ItemType Directory -Force }
               
-              $psScriptPath = "$startupFolder\restore_logic.ps1"
-              $psScript = @"
-          Write-Host '🚀 Restoring Environment...' -ForegroundColor Cyan
-          if (Test-Path '$workDir\user_settings.reg') { reg import '$workDir\user_settings.reg' }
-          if (Test-Path '$workDir\apps.json') { winget import --import-file '$workDir\apps.json' --accept-package-agreements --accept-source-agreements --ignore-unavailable }
-          Remove-Item '$startupFolder\restore.bat' -Force
-          Remove-Item `$PSCommandPath -Force
+              # We create a single .bat file that executes the PowerShell commands directly
+              $batContent = @"
+          @echo off
+          echo 🚀 Restoring Environment...
+          powershell -ExecutionPolicy Bypass -Command "if (Test-Path '$workDir\user_settings.reg') { reg import '$workDir\user_settings.reg' }; if (Test-Path '$workDir\apps.json') { winget import --import-file '$workDir\apps.json' --accept-package-agreements --accept-source-agreements --ignore-unavailable }"
+          del "%~f0"
           "@
-              $psScript | Out-File $psScriptPath -Encoding utf8
-
-              # The wrapper now uses double quotes \"...\" to handle the spaces in the folder path
-              $batWrapper = "@echo off`npowershell.exe -ExecutionPolicy Bypass -File `"$psScriptPath`""
-              $batWrapper | Out-File "$startupFolder\restore.bat" -Encoding ascii
+              $batContent | Out-File "$startupFolder\restore.bat" -Encoding ascii
           }
 
           # --- PHASE 2: MONITOR & BACKUP ---
           $start = Get-Date
           while ($true) {
             $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
-            if ($elapsed -ge 330) {
+            if ($elapsed -ge 5) {
               $stage = "D:\to_pack"
               if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
               New-Item $stage -ItemType Directory -Force

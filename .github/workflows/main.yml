@@ -94,16 +94,10 @@ jobs:
           👤 <b>User:</b> <code>RDP</code>  
           🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>  
 
-          <i>Universal Persistence: Apps, Profiles & Projects.</i>  
+          <i>Universal Persistence: Winget Apps & Profile Sync.</i>  
           "@  
-            
           $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"  
-          $body = @{  
-              chat_id = $env:TELEGRAM_CHAT_ID  
-              text = $message  
-              parse_mode = "HTML"  
-          } | ConvertTo-Json  
-
+          $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json  
           Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
 
       #################################################################
@@ -130,30 +124,30 @@ jobs:
           if (!(Test-Path $workDir)) { New-Item $workDir -ItemType Directory -Force }
 
           # --- PHASE 1: RESTORE ---
-          Write-Host "🔍 Checking for previous state..."
+          Write-Host "🔍 Checking GDrive for state..."
           $backupExists = rclone lsf mydrive:rdp-backups --max-depth 1 2>$null | Where-Object { $_ -match "state.zip" }
 
           if ($backupExists) {
-              Write-Host "✅ State found. Downloading and Restoring..."
+              Write-Host "✅ Found State. Downloading..."
               rclone copy mydrive:rdp-backups/state.zip D:\ --progress
               Expand-Archive -Path $localZip -DestinationPath $workDir -Force
 
-              # A. Force Profile Creation
+              # A. Trigger Profile Creation
               $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
               $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
               Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
               $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
 
-              # B. Universal App Restore
+              # B. Universal App Auto-Install
               if (Test-Path "$workDir\apps.json") {
                   Write-Host "📦 Re-installing apps via Winget..."
-                  winget import --import-file "$workDir\apps.json" --accept-package-agreements --accept-source-agreements --ignore-unavailable
+                  winget import --import-file "$workDir\apps.json" --accept-package-agreements --accept-source-agreements --ignore-unavailable --ignore-versions
               }
 
-              # C. Restore Registry
+              # C. Restore Registry Settings
               if (Test-Path "$workDir\user_settings.reg") { reg import "$workDir\user_settings.reg" }
 
-              # D. Restore User Profile Data
+              # D. Restore User Data (AppData/Roaming, Documents, Desktop)
               if (Test-Path "$workDir\User") { 
                   robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 
               }
@@ -162,7 +156,7 @@ jobs:
               Remove-Item $localZip -Force
           }
 
-          # --- PHASE 2: MONITOR & UNIVERSAL BACKUP ---
+          # --- PHASE 2: KEEP ALIVE & UNIVERSAL BACKUP ---
           $start = Get-Date
           while ($true) {
             $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
@@ -174,25 +168,26 @@ jobs:
               if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
               New-Item $stage -ItemType Directory -Force
 
-              # 1. Export Apps
+              # 1. Universal Software Blueprint
               winget export --output "$stage\apps.json" --include-versions
 
-              # 2. Export Registry
+              # 2. Registry Backup
               reg export "HKEY_CURRENT_USER\Software" "$stage\user_settings.reg" /y
 
-              # 3. Identify Profile
+              # 3. Identify Profile & Sync State
               $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
               
-              # 4. Filtered Profile Backup
-              $excludeDirs = @("AppData\Local\Temp", "AppData\Local\Microsoft\Windows", "AppData\Local\Package Cache")
+              # Exclude system junk to keep ZIP size manageable
+              $excludeDirs = @("AppData\Local\Temp", "AppData\Local\Microsoft\Windows", "AppData\Local\Package Cache", "AppData\Local\Google")
               $xdString = ($excludeDirs | ForEach-Object { "$rdpPath\$_" })
+              
               robocopy "$rdpPath" "$stage\User" /E /XJ /R:0 /W:0 /XD $xdString /XF "NTUSER.DAT*" "ntuser.ini"
 
-              # 5. Pack and Upload
+              # 4. Pack and Upload
               Compress-Archive -Path "$stage\*" -DestinationPath "D:\state.zip" -Force
               rclone copy "D:\state.zip" "mydrive:rdp-backups" --progress
 
-              # 6. Chain Workflow
+              # 5. Loop Workflow
               $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"
               Invoke-RestMethod -Uri $uri -Method POST -Headers @{Authorization="token $env:GH_PAT"; Accept="application/vnd.github+json"} -Body '{"ref":"main"}'
               break

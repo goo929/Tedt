@@ -11,205 +11,206 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 3600
 
-    steps:  
-      #################################################################  
-      # 1️⃣ Configure Core RDP Settings  
-      #################################################################  
-      - name: Configure Core RDP Settings  
-        run: |  
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force  
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force  
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force  
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"  
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389  
-          Restart-Service -Name TermService -Force  
+    steps:    
+      #################################################################    
+      # 1️⃣ Configure Core RDP Settings    
+      #################################################################    
+      - name: Configure Core RDP Settings    
+        run: |    
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force    
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force    
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force    
+          netsh advfirewall firewall delete rule name="RDP-Tailscale"    
+          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389    
+          Restart-Service -Name TermService -Force    
 
-      #################################################################  
-      # 2️⃣ Create RDP User  
-      #################################################################  
-      - name: Create RDP User with Secure Password  
-        run: |  
-          Add-Type -AssemblyName System.Security  
-          $charSet = @{  
-            Upper   = [char[]]"ABCDEFGHIJKLMNOPQRSTUVWXYZ"  
-            Lower   = [char[]]"abcdefghijklmnopqrstuvwxyz"  
-            Number  = [char[]]"0123456789"  
-            Special = [char[]]"!@#$%^&*"  
-          }  
-          $rawPassword = @()  
-          $rawPassword += $charSet.Upper | Get-Random -Count 4  
-          $rawPassword += $charSet.Lower | Get-Random -Count 4  
-          $rawPassword += $charSet.Number | Get-Random -Count 4  
-          $rawPassword += $charSet.Special | Get-Random -Count 4  
-          $password = -join ($rawPassword | Sort-Object { Get-Random })  
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force  
-          $user = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue  
-          if (-not $user) {  
-            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires  
-            Add-LocalGroupMember -Group "Administrators" -Member "RDP"  
-            Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"  
-          }  
-          echo "RDP_CREDS=$password" >> $env:GITHUB_ENV  
+      #################################################################    
+      # 2️⃣ Create RDP User    
+      #################################################################    
+      - name: Create RDP User with Secure Password    
+        run: |    
+          Add-Type -AssemblyName System.Security    
+          $charSet = @{    
+            Upper   = [char[]]"ABCDEFGHIJKLMNOPQRSTUVWXYZ"    
+            Lower   = [char[]]"abcdefghijklmnopqrstuvwxyz"    
+            Number  = [char[]]"0123456789"    
+            Special = [char[]]"!@#$%^&*"    
+          }    
+          $rawPassword = @()    
+          $rawPassword += $charSet.Upper | Get-Random -Count 4    
+          $rawPassword += $charSet.Lower | Get-Random -Count 4    
+          $rawPassword += $charSet.Number | Get-Random -Count 4    
+          $rawPassword += $charSet.Special | Get-Random -Count 4    
+          $password = -join ($rawPassword | Sort-Object { Get-Random })    
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force    
+          $user = Get-LocalUser -Name "RDP" -ErrorAction SilentlyContinue    
+          if (-not $user) {    
+            New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires    
+            Add-LocalGroupMember -Group "Administrators" -Member "RDP"    
+            Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"    
+          }    
+          echo "RDP_CREDS=$password" >> $env:GITHUB_ENV    
 
-      #################################################################  
-      # 3️⃣ Install Tailscale  
-      #################################################################  
-      - name: Install Tailscale  
-        run: |  
-          $url="https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"  
-          $file="$env:TEMP\tailscale.msi"  
-          Invoke-WebRequest $url -OutFile $file  
-          Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait  
-          Remove-Item $file -Force  
+      #################################################################    
+      # 3️⃣ Install Tailscale    
+      #################################################################    
+      - name: Install Tailscale    
+        run: |    
+          $url="https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"    
+          $file="$env:TEMP\tailscale.msi"    
+          Invoke-WebRequest $url -OutFile $file    
+          Start-Process msiexec.exe -ArgumentList "/i `"$file`" /quiet /norestart" -Wait    
+          Remove-Item $file -Force    
 
-      #################################################################  
-      # 4️⃣ Connect Tailscale  
-      #################################################################  
-      - name: Establish Tailscale Connection  
-        run: |  
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=rdp-node  
-          $ip=$null  
-          for ($i=0;$i -lt 10;$i++){  
-            $ip=& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4  
-            if($ip){break}  
-            Start-Sleep 5  
-          }  
-          if(-not $ip){exit 1}  
-          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV  
+      #################################################################    
+      # 4️⃣ Connect Tailscale    
+      #################################################################    
+      - name: Establish Tailscale Connection    
+        run: |    
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=rdp-node    
+          $ip=$null    
+          for ($i=0;$i -lt 10;$i++){    
+            $ip=& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4    
+            if($ip){break}    
+            Start-Sleep 5    
+          }    
+          if(-not $ip){exit 1}    
+          echo "TAILSCALE_IP=$ip" >> $env:GITHUB_ENV    
 
-      #################################################################  
-      # 5️⃣ Send Credentials to Telegram  
-      #################################################################  
-      - name: Send Notification to Telegram  
-        env:  
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}  
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}  
-          RDP_PASS: ${{ env.RDP_CREDS }}  
-          RDP_IP: ${{ env.TAILSCALE_IP }}  
-        run: |  
-          $message = @"  
-          🚀 <b>Universal RDP Ready</b>  
+      #################################################################    
+      # 5️⃣ Send Credentials to Telegram    
+      #################################################################    
+      - name: Send Notification to Telegram    
+        env:    
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}    
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}    
+          RDP_PASS: ${{ env.RDP_CREDS }}    
+          RDP_IP: ${{ env.TAILSCALE_IP }}    
+        run: |    
+          $message = @"    
+          🚀 <b>Universal RDP Ready</b>    
 
-          🌐 <b>IP:</b> <code>$($env:RDP_IP)</code>    
-          👤 <b>User:</b> <code>RDP</code>    
-          🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>    
+          🌐 <b>IP:</b> <code>$($env:RDP_IP)</code>      
+          👤 <b>User:</b> <code>RDP</code>      
+          🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>      
 
-          <i>System will auto-install previous apps & sync profile.</i>    
-          "@    
+          <i>System will auto-install previous apps & sync profile.</i>      
+          "@      
+          $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"      
+          $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json      
+          Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body    
+
+      #################################################################    
+      # 6️⃣ Install rclone    
+      #################################################################    
+      - name: Install rclone    
+        run: |    
+          Invoke-WebRequest https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile rclone.zip    
+          Expand-Archive rclone.zip -DestinationPath $env:TEMP    
+          Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"    
+
+      #################################################################    
+      # 7️⃣ Universal Persistence (Interactive Context Modification)    
+      #################################################################    
+      - name: Restore, Run, and Backup    
+        env:    
+          RCLONE_CONFIG_MYDRIVE_TYPE: "drive"    
+          RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}    
+          GH_PAT: ${{ secrets.GH_PAT }}    
+          RDP_CREDS: ${{ env.RDP_CREDS }}    
+        run: |    
+          $workDir = "D:\persistence_stage"    
+          $localZip = "D:\state.zip"    
+          if (!(Test-Path $workDir)) { New-Item $workDir -ItemType Directory -Force }    
+
+          # --- PHASE 1: RESTORE ---    
+          Write-Host "🔍 Checking GDrive for state..."    
+          rclone copy mydrive:rdp-backups/state.zip D:\ --progress    
+          if (Test-Path $localZip) {
+              Expand-Archive -Path $localZip -DestinationPath $workDir -Force    
+
+              # A. Initialize Profile (Context Fix)
+              Write-Host "👤 Initializing RDP User Profile..."  
+              $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force    
+              $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)    
+              # Forces user environment to load by starting a dummy process as RDP
+              Start-Process powershell.exe -Credential $cred -ArgumentList "-Command exit" -Wait
+              Start-Sleep 20 
+                
+              $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName    
+
+              # B. Registry Import
+              if (Test-Path "$workDir\user_settings.reg") { 
+                  Write-Host "🔑 Importing Registry..."
+                  reg import "$workDir\user_settings.reg"
+              }
+
+              # C. Restore User Data (Excluding Locked Registry Files)
+              if (Test-Path "$workDir\User") {   
+                  Write-Host "📂 Syncing User Files..."
+                  $excludeFiles = @("NTUSER.DAT*", "ntuser.ini")
+                  robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 /MT:16 /NP /XF $excludeFiles
+              }    
+
+              # D. Path Injection
+              $extraPaths = @("$rdpPath\.cargo\bin", "$rdpPath\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin")
+              $currentPath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+              foreach ($p in $extraPaths) { if (Test-Path $p) { $currentPath = "$p;$currentPath" } }
+              [System.Environment]::SetEnvironmentVariable("Path", $currentPath, "Machine")
+
+              # E. Winget Restore (Context Fix: Runs as RDP User)
+              if (Test-Path "$workDir\apps.json") {    
+                  Write-Host "📦 Restoring Winget Apps as RDP User..."    
+                  $wingetCmd = "winget import --import-file `"$workDir\apps.json`" --accept-package-agreements --accept-source-agreements --ignore-unavailable"
+                  Start-Process powershell.exe -Credential $cred -ArgumentList "-Command $wingetCmd" -Wait
+              }    
+                  
+              rclone deletefile mydrive:rdp-backups/state.zip    
+              Remove-Item $localZip -Force    
+          }
+
+          # --- PHASE 2: MONITOR & BACKUP ---    
+          $start = Get-Date    
+          while ($true) {    
+            $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes    
+            Write-Host "RDP Active | Time: $([math]::Round($elapsed, 2)) min"    
+
+            if ($elapsed -ge 330) {    
+              Write-Host "⏳ 5.5 Hours reached. Preparing Universal Backup..."    
+              $stage = "D:\to_pack"    
+              if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }    
+              New-Item $stage -ItemType Directory -Force    
+
+              winget export --output "$stage\apps.json"    
+              reg export "HKEY_CURRENT_USER\Software" "$stage\user_settings.reg" /y    
+
+              $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName    
+              $excludeDirs = @("AppData\Local\Temp", "AppData\Local\Microsoft\Windows", "AppData\Local\Package Cache", "AppData\Local\Google")    
+              $xdString = ($excludeDirs | ForEach-Object { "$rdpPath\$_" })    
+              robocopy "$rdpPath" "$stage\User" /E /XJ /R:0 /W:0 /XD $xdString /XF "NTUSER.DAT*" "ntuser.ini"    
+
+              Compress-Archive -Path "$stage\*" -DestinationPath "D:\state.zip" -Force    
+              rclone copy "D:\state.zip" "mydrive:rdp-backups" --progress    
+
+              $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"    
+              Invoke-RestMethod -Uri $uri -Method POST -Headers @{Authorization="token $env:GH_PAT"; Accept="application/vnd.github+json"} -Body '{"ref":"main"}'    
+              break    
+            }    
+            Start-Sleep 300    
+          }    
+
+      #################################################################    
+      # 8️⃣ Final Status    
+      #################################################################  
+      - name: Send Final Status to Telegram    
+        if: always()    
+        env:    
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}    
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}    
+        run: |    
+          $status = "${{ job.status }}"    
+          $message = "🏁 <b>Session Transitioned</b>`nStatus: <b>$status</b>"    
           $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"    
           $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json    
-          Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body  
-
-      #################################################################  
-      # 6️⃣ Install rclone  
-      #################################################################  
-      - name: Install rclone  
-        run: |  
-          Invoke-WebRequest https://downloads.rclone.org/rclone-current-windows-amd64.zip -OutFile rclone.zip  
-          Expand-Archive rclone.zip -DestinationPath $env:TEMP  
-          Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"  
-
-      #################################################################  
-      # 7️⃣ Universal Persistence (Winget Restore & Profile Guard)  
-      #################################################################  
-      - name: Restore, Run, and Backup  
-        env:  
-          RCLONE_CONFIG_MYDRIVE_TYPE: "drive"  
-          RCLONE_CONFIG_MYDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}  
-          GH_PAT: ${{ secrets.GH_PAT }}  
-          RDP_CREDS: ${{ env.RDP_CREDS }}  
-        run: |  
-          $workDir = "D:\persistence_stage"  
-          $localZip = "D:\state.zip"  
-          if (!(Test-Path $workDir)) { New-Item $workDir -ItemType Directory -Force }  
-
-          # --- PHASE 1: RESTORE ---  
-          Write-Host "🔍 Checking GDrive for state..."  
-          $backupExists = rclone lsf mydrive:rdp-backups --max-depth 1 2>$null | Where-Object { $_ -match "state.zip" }  
-
-          if ($backupExists) {  
-              Write-Host "✅ Found State. Downloading..."  
-              rclone copy mydrive:rdp-backups/state.zip D:\ --progress  
-              Expand-Archive -Path $localZip -DestinationPath $workDir -Force  
-
-              # A. Trigger Profile Creation & Wait for Registry Hives
-              Write-Host "👤 Initializing RDP User Profile..."
-              $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force  
-              $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)  
-              Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job  
-              Start-Sleep 15 
-              
-              $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName  
-
-              # B. Universal App Auto-Install (Winget Import)
-              if (Test-Path "$workDir\apps.json") {  
-                  Write-Host "📦 Refreshing Winget Sources..."  
-                  winget source update | Out-Null
-                  
-                  Write-Host "📦 Re-installing apps in Machine Scope..."  
-                  winget import --import-file "$workDir\apps.json" --accept-package-agreements --accept-source-agreements --ignore-unavailable --scope machine
-                  
-                  # Refresh Environment Path for the current session
-                  $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-              }  
-
-              # C. Restore Registry & User Data
-              if (Test-Path "$workDir\user_settings.reg") { reg import "$workDir\user_settings.reg" }  
-              if (Test-Path "$workDir\User") { 
-                  robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 /MT:16
-              }  
-                
-              rclone deletefile mydrive:rdp-backups/state.zip  
-              Remove-Item $localZip -Force  
-          }  
-
-          # --- PHASE 2: MONITOR & UNIVERSAL BACKUP ---  
-          $start = Get-Date  
-          while ($true) {  
-            $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes  
-            Write-Host "RDP Active | Time: $([math]::Round($elapsed, 2)) min"  
-
-            if ($elapsed -ge 5) {  
-              Write-Host "⏳ 5.5 Hours reached. Preparing Universal Backup..."  
-              $stage = "D:\to_pack"  
-              if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }  
-              New-Item $stage -ItemType Directory -Force  
-
-              # 1. Export App List (Blueprint)
-              winget export --output "$stage\apps.json"  
-
-              # 2. Capture User Registry Settings
-              reg export "HKEY_CURRENT_USER\Software" "$stage\user_settings.reg" /y  
-
-              # 3. Identify and Sync User State (Exclude Temp junk)
-              $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName  
-              $excludeDirs = @("AppData\Local\Temp", "AppData\Local\Microsoft\Windows", "AppData\Local\Package Cache", "AppData\Local\Google")  
-              $xdString = ($excludeDirs | ForEach-Object { "$rdpPath\$_" })  
-              robocopy "$rdpPath" "$stage\User" /E /XJ /R:0 /W:0 /XD $xdString /XF "NTUSER.DAT*" "ntuser.ini"  
-
-              # 4. Pack, Upload and Trigger Next Session
-              Compress-Archive -Path "$stage\*" -DestinationPath "D:\state.zip" -Force  
-              rclone copy "D:\state.zip" "mydrive:rdp-backups" --progress  
-
-              $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"  
-              Invoke-RestMethod -Uri $uri -Method POST -Headers @{Authorization="token $env:GH_PAT"; Accept="application/vnd.github+json"} -Body '{"ref":"main"}'  
-              break  
-            }  
-            Start-Sleep 300  
-          }  
-
-      #################################################################  
-      # 8️⃣ Final Status  
-      #################################################################  
-      - name: Send Final Status to Telegram  
-        if: always()  
-        env:  
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}  
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}  
-        run: |  
-          $status = "${{ job.status }}"  
-          $message = "🏁 <b>Session Transitioned</b>`nStatus: <b>$status</b>"  
-          $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"  
-          $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json  
           Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
           

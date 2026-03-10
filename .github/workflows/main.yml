@@ -94,7 +94,7 @@ jobs:
           👤 <b>User:</b> <code>RDP</code>
           🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
-          <i>A terminal will open on login to restore your apps and settings.</i>
+          <i>Apps will restore via a terminal window upon login.</i>
           "@
           $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"      
           $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json      
@@ -110,7 +110,7 @@ jobs:
           Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"    
 
       #################################################################    
-      # 7️⃣ Universal Persistence (GDrive Bin & Winget Fix)    
+      # 7️⃣ Persistence & Restore (Fixed Pathing)    
       #################################################################    
       - name: Restore, Run, and Backup    
         env:    
@@ -124,12 +124,14 @@ jobs:
           if (!(Test-Path $workDir)) { New-Item $workDir -ItemType Directory -Force }
 
           # --- PHASE 1: RESTORE ---
-          rclone copy mydrive:rdp-backups/state.zip D:\ --progress
-          if (Test-Path $localZip) {
+          # Check if file exists first to avoid the "directory not found" crash
+          $check = rclone lsf mydrive: --include "rdp-backups/state.zip" --recursive
+          if ($check) {
+              rclone copy "mydrive:rdp-backups/state.zip" "D:\" --progress
               Expand-Archive -Path $localZip -DestinationPath $workDir -Force
               
-              # MOVE TO BIN (Trash) instead of permanent delete
-              rclone delete mydrive:rdp-backups/state.zip --drive-use-trash=true
+              # Move to Trash (bin)
+              rclone delete "mydrive:rdp-backups/state.zip" --drive-use-trash=true
 
               # Trigger Profile Creation  
               $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
@@ -137,24 +139,25 @@ jobs:
               Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
               Start-Sleep 5
                 
-              $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
+              $rdpUserObj = Get-LocalUser -Name "RDP"
+              $rdpPath = "C:\Users\RDP" # Hardcoded for reliability in this specific environment
 
               # Sync User Files
               if (Test-Path "$workDir\User") {
-                  $excludeFiles = @("NTUSER.DAT*", "ntuser.ini", "usrClass.dat*")
-                  robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 /MT:16 /NP /XF $excludeFiles
+                  robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 /MT:16 /NP /XF "NTUSER.DAT*" "ntuser.ini"
               }
 
-              # STARTUP BAT (Enhanced with Winget Source Refresh)
+              # STARTUP BAT (Fixed Winget Pathing)
               $startupFolder = "$rdpPath\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
               if (!(Test-Path $startupFolder)) { New-Item $startupFolder -ItemType Directory -Force }
               
               $batContent = @"
           @echo off
-          echo 🚀 Restoring Environment...
-          echo 🛠 Initializing Winget Source...
+          echo 🚀 Initializing restoration...
+          timeout /t 5
+          :: Reset Winget and import apps
           powershell -ExecutionPolicy Bypass -Command "winget source reset --force; if (Test-Path '$workDir\user_settings.reg') { reg import '$workDir\user_settings.reg' }; if (Test-Path '$workDir\apps.json') { winget import --import-file '$workDir\apps.json' --accept-package-agreements --accept-source-agreements --ignore-unavailable }"
-          echo ✅ Restoration Complete.
+          echo ✅ Setup Complete.
           pause
           del "%~f0"
           "@
@@ -173,9 +176,8 @@ jobs:
               winget export --output "$stage\apps.json"
               reg export "HKEY_CURRENT_USER\Software" "$stage\user_settings.reg" /y
 
-              $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
-              $excludeDirs = @("AppData\Local\Temp", "AppData\Local\Microsoft\Windows")
-              robocopy "$rdpPath" "$stage\User" /E /XJ /R:0 /W:0 /XD ($excludeDirs | ForEach-Object { "$rdpPath\$_" }) /XF "NTUSER.DAT*" "ntuser.ini"
+              $rdpPath = "C:\Users\RDP"
+              robocopy "$rdpPath" "$stage\User" /E /XJ /R:0 /W:0 /XD "$rdpPath\AppData\Local\Temp" "$rdpPath\AppData\Local\Microsoft\Windows" /XF "NTUSER.DAT*" "ntuser.ini"
 
               Compress-Archive -Path "$stage\*" -DestinationPath "D:\state.zip" -Force
               rclone copy "D:\state.zip" "mydrive:rdp-backups" --progress
@@ -192,13 +194,10 @@ jobs:
       #################################################################  
       - name: Send Final Status to Telegram    
         if: always()    
-        env:    
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}    
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}    
         run: |    
           $status = "${{ job.status }}"
-          $message = "🏁 <b>Session Transitioned</b>`nStatus: <b>$status</b>"
-          $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
-          $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json
+          $message = "🏁 <b>Session Finished</b>`nStatus: <b>$status</b>"
+          $url = "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage"
+          $body = @{ chat_id = "${{ secrets.TELEGRAM_CHAT_ID }}"; text = $message; parse_mode = "HTML" } | ConvertTo-Json
           Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
           

@@ -172,7 +172,7 @@ jobs:
                 $lastLog = $elapsed
             }
             
-            if ($elapsed -ge 5) {
+            if ($elapsed -ge 330) {
               $stage = "D:\to_pack"
               if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
               New-Item $stage -ItemType Directory -Force

@@ -87,15 +87,15 @@ jobs:
           RDP_PASS: ${{ env.RDP_CREDS }}    
           RDP_IP: ${{ env.TAILSCALE_IP }}    
         run: |    
-          $message = @"    
-          🚀 <b>Universal RDP Ready</b>    
+          $message = @"
+          🚀 <b>Universal RDP Ready</b>
 
-          🌐 <b>IP:</b> <code>$($env:RDP_IP)</code>      
-          👤 <b>User:</b> <code>RDP</code>      
-          🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>      
+          🌐 <b>IP:</b> <code>$($env:RDP_IP)</code>
+          👤 <b>User:</b> <code>RDP</code>
+          🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
-          <i>Software will install automatically upon login.</i>      
-          "@      
+          <i>Apps will auto-install once you log in via RDP.</i>
+          "@
           $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"      
           $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json      
           Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body    
@@ -110,7 +110,7 @@ jobs:
           Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"    
 
       #################################################################    
-      # 7️⃣ Universal Persistence (Modified to use Startup Injection)    
+      # 7️⃣ Universal Persistence (Fixed Script Termination)    
       #################################################################    
       - name: Restore, Run, and Backup    
         env:    
@@ -119,77 +119,80 @@ jobs:
           GH_PAT: ${{ secrets.GH_PAT }}    
           RDP_CREDS: ${{ env.RDP_CREDS }}    
         run: |    
-          $workDir = "D:\persistence_stage"    
-          $localZip = "D:\state.zip"    
-          if (!(Test-Path $workDir)) { New-Item $workDir -ItemType Directory -Force }    
+          $workDir = "D:\persistence_stage"
+          $localZip = "D:\state.zip"
+          if (!(Test-Path $workDir)) { New-Item $workDir -ItemType Directory -Force }
 
-          # --- PHASE 1: RESTORE ---    
-          rclone copy mydrive:rdp-backups/state.zip D:\ --progress    
+          # --- PHASE 1: RESTORE ---
+          Write-Host "🔍 Checking GDrive for state..."
+          rclone copy mydrive:rdp-backups/state.zip D:\ --progress 2>$null
           if (Test-Path $localZip) {
-              Expand-Archive -Path $localZip -DestinationPath $workDir -Force    
+              Expand-Archive -Path $localZip -DestinationPath $workDir -Force
 
               # A. Trigger Profile Creation  
-              $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force    
-              $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)    
-              Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job    
+              $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
+              $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
+              Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
               Start-Sleep 10
                 
-              $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName    
+              $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
 
               # B. Registry & File Sync (Excluding locks)
-              if (Test-Path "$workDir\User") {   
+              if (Test-Path "$workDir\User") {
                   $excludeFiles = @("NTUSER.DAT*", "ntuser.ini", "usrClass.dat*")
                   robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 /MT:16 /NP /XF $excludeFiles
-              }    
+              }
 
-              # C. PATH INJECTION (System Wide)
+              # C. PATH INJECTION
               $extraPaths = @("$rdpPath\.cargo\bin", "$rdpPath\.rustup\toolchains\stable-x86_64-pc-windows-msvc\bin")
               $currentPath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
               foreach ($p in $extraPaths) { if (Test-Path $p) { $currentPath = "$p;$currentPath" } }
               [System.Environment]::SetEnvironmentVariable("Path", $currentPath, "Machine")
 
-              # D. STARTUP INJECTION (The "Install on Login" Fix)
-              # This creates a script that runs the moment you actually open the RDP window
+              # D. STARTUP INJECTION (NO SPACES BEFORE TERMINATOR)
               $startupFolder = "$rdpPath\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
               if (!(Test-Path $startupFolder)) { New-Item $startupFolder -ItemType Directory -Force }
               
               $installScript = @"
-              # Registry Import
-              if (Test-Path '$workDir\user_settings.reg') { reg import '$workDir\user_settings.reg' }
-              # Winget Import
-              if (Test-Path '$workDir\apps.json') { winget import --import-file '$workDir\apps.json' --accept-package-agreements --accept-source-agreements --ignore-unavailable }
-              # Cleanup: Remove this script after first run
-              Remove-Item `$PSCommandPath -Force
-              "@
+          # Registry Import
+          if (Test-Path '$workDir\user_settings.reg') { reg import '$workDir\user_settings.reg' }
+          # Winget Import
+          if (Test-Path '$workDir\apps.json') { winget import --import-file '$workDir\apps.json' --accept-package-agreements --accept-source-agreements --ignore-unavailable }
+          # Cleanup script
+          Remove-Item `$PSCommandPath -Force
+          "@
               $installScript | Out-File "$startupFolder\restore_apps.ps1" -Encoding utf8
           }
 
-          # --- PHASE 2: MONITOR & BACKUP ---    
-          $start = Get-Date    
-          while ($true) {    
-            $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes    
-            if ($elapsed -ge 330) {    
-              $stage = "D:\to_pack"    
-              if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }    
-              New-Item $stage -ItemType Directory -Force    
+          # --- PHASE 2: MONITOR & BACKUP ---
+          $start = Get-Date
+          while ($true) {
+            $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
+            Write-Host "RDP Active | Time: $([math]::Round($elapsed, 2)) min"
 
-              winget export --output "$stage\apps.json"    
-              reg export "HKEY_CURRENT_USER\Software" "$stage\user_settings.reg" /y    
+            if ($elapsed -ge 330) {
+              Write-Host "⏳ 5.5 Hours reached. Preparing Backup..."
+              $stage = "D:\to_pack"
+              if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+              New-Item $stage -ItemType Directory -Force
 
-              $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName    
-              $excludeDirs = @("AppData\Local\Temp", "AppData\Local\Microsoft\Windows")    
-              $xdString = ($excludeDirs | ForEach-Object { "$rdpPath\$_" })    
-              robocopy "$rdpPath" "$stage\User" /E /XJ /R:0 /W:0 /XD $xdString /XF "NTUSER.DAT*" "ntuser.ini"    
+              winget export --output "$stage\apps.json"
+              reg export "HKEY_CURRENT_USER\Software" "$stage\user_settings.reg" /y
 
-              Compress-Archive -Path "$stage\*" -DestinationPath "D:\state.zip" -Force    
-              rclone copy "D:\state.zip" "mydrive:rdp-backups" --progress    
+              $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
+              $excludeDirs = @("AppData\Local\Temp", "AppData\Local\Microsoft\Windows")
+              $xdString = ($excludeDirs | ForEach-Object { "$rdpPath\$_" })
+              robocopy "$rdpPath" "$stage\User" /E /XJ /R:0 /W:0 /XD $xdString /XF "NTUSER.DAT*" "ntuser.ini"
 
-              $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"    
-              Invoke-RestMethod -Uri $uri -Method POST -Headers @{Authorization="token $env:GH_PAT"; Accept="application/vnd.github+json"} -Body '{"ref":"main"}'    
-              break    
-            }    
-            Start-Sleep 300    
-          }    
+              Compress-Archive -Path "$stage\*" -DestinationPath "D:\state.zip" -Force
+              rclone copy "D:\state.zip" "mydrive:rdp-backups" --progress
+
+              $uri = "https://api.github.com/repos/${{ github.repository }}/actions/workflows/main.yml/dispatches"
+              Invoke-RestMethod -Uri $uri -Method POST -Headers @{Authorization="token $env:GH_PAT"; Accept="application/vnd.github+json"} -Body '{"ref":"main"}'
+              break
+            }
+            Start-Sleep 300
+          }
 
       #################################################################    
       # 8️⃣ Final Status    
@@ -200,9 +203,9 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}    
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}    
         run: |    
-          $status = "${{ job.status }}"    
-          $message = "🏁 <b>Session Transitioned</b>`nStatus: <b>$status</b>"    
-          $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"    
-          $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json    
+          $status = "${{ job.status }}"
+          $message = "🏁 <b>Session Transitioned</b>`nStatus: <b>$status</b>"
+          $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"
+          $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json
           Invoke-RestMethod -Uri $url -Method Post -ContentType "application/json" -Body $body
-          
+          a

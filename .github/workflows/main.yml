@@ -94,7 +94,7 @@ jobs:
           👤 <b>User:</b> <code>RDP</code>
           🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
-          <i>A terminal window will pop up upon login to install your apps.</i>
+          <i>Apps will auto-restore in a terminal window upon login.</i>
           "@
           $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"      
           $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json      
@@ -110,7 +110,7 @@ jobs:
           Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"    
 
       #################################################################    
-      # 7️⃣ Universal Persistence (Fixed Startup Execution)    
+      # 7️⃣ Universal Persistence (Fixed Quoting & Cleanup)    
       #################################################################    
       - name: Restore, Run, and Backup    
         env:    
@@ -124,9 +124,12 @@ jobs:
           if (!(Test-Path $workDir)) { New-Item $workDir -ItemType Directory -Force }
 
           # --- PHASE 1: RESTORE ---
-          rclone copy mydrive:rdp-backups/state.zip D:\ --progress 2>$null
+          rclone copy mydrive:rdp-backups/state.zip D:\ --progress
           if (Test-Path $localZip) {
               Expand-Archive -Path $localZip -DestinationPath $workDir -Force
+              
+              # Cleanup Google Drive immediately after download
+              rclone delete mydrive:rdp-backups/state.zip --drive-use-trash=false
 
               # A. Trigger Profile Creation  
               $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
@@ -135,17 +138,17 @@ jobs:
                 
               $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
 
-              # B. Registry & File Sync (Excluding locks)
+              # B. Sync User Files
               if (Test-Path "$workDir\User") {
                   $excludeFiles = @("NTUSER.DAT*", "ntuser.ini", "usrClass.dat*")
                   robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 /MT:16 /NP /XF $excludeFiles
               }
 
-              # C. STARTUP INJECTION (BAT Wrapper to prevent Notepad popup)
+              # C. STARTUP INJECTION (Fixed Quoting for Spaces)
               $startupFolder = "$rdpPath\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
               if (!(Test-Path $startupFolder)) { New-Item $startupFolder -ItemType Directory -Force }
               
-              # The PowerShell payload
+              $psScriptPath = "$startupFolder\restore_logic.ps1"
               $psScript = @"
           Write-Host '🚀 Restoring Environment...' -ForegroundColor Cyan
           if (Test-Path '$workDir\user_settings.reg') { reg import '$workDir\user_settings.reg' }
@@ -153,10 +156,10 @@ jobs:
           Remove-Item '$startupFolder\restore.bat' -Force
           Remove-Item `$PSCommandPath -Force
           "@
-              $psScript | Out-File "$startupFolder\restore_logic.ps1" -Encoding utf8
+              $psScript | Out-File $psScriptPath -Encoding utf8
 
-              # The Batch wrapper (This is what Windows actually runs)
-              $batWrapper = "@echo off`npowershell.exe -ExecutionPolicy Bypass -File `"$startupFolder\restore_logic.ps1`""
+              # The wrapper now uses double quotes \"...\" to handle the spaces in the folder path
+              $batWrapper = "@echo off`npowershell.exe -ExecutionPolicy Bypass -File `"$psScriptPath`""
               $batWrapper | Out-File "$startupFolder\restore.bat" -Encoding ascii
           }
 

@@ -94,7 +94,7 @@ jobs:
           👤 <b>User:</b> <code>RDP</code>
           🔑 <b>Pass:</b> <code>$($env:RDP_PASS)</code>
 
-          <i>Apps will auto-restore in a terminal window upon login.</i>
+          <i>A terminal will open to restore your apps shortly after login.</i>
           "@
           $url = "https://api.telegram.org/bot$($env:TELEGRAM_TOKEN)/sendMessage"      
           $body = @{ chat_id = $env:TELEGRAM_CHAT_ID; text = $message; parse_mode = "HTML" } | ConvertTo-Json      
@@ -110,7 +110,7 @@ jobs:
           Copy-Item "$env:TEMP\rclone*\rclone.exe" "C:\Windows\System32\rclone.exe"    
 
       #################################################################    
-      # 7️⃣ Universal Persistence (Robust One-File Fix)    
+      # 7️⃣ Universal Persistence (Fixed Winget & GDrive Trash)    
       #################################################################    
       - name: Restore, Run, and Backup    
         env:    
@@ -127,9 +127,10 @@ jobs:
           rclone copy mydrive:rdp-backups/state.zip D:\ --progress
           if (Test-Path $localZip) {
               Expand-Archive -Path $localZip -DestinationPath $workDir -Force
-              rclone delete mydrive:rdp-backups/state.zip --drive-use-trash=false
+              
+              # MOVES TO BIN: Using trash=true allows you to manually restore/delete later
+              rclone delete mydrive:rdp-backups/state.zip --drive-use-trash=true
 
-              # A. Trigger Profile Creation  
               $secStr = ConvertTo-SecureString $env:RDP_CREDS -AsPlainText -Force
               $cred = New-Object System.Management.Automation.PSCredential("RDP", $secStr)
               Start-Job -ScriptBlock { whoami } -Credential $cred | Wait-Job
@@ -137,21 +138,23 @@ jobs:
                 
               $rdpPath = (Get-ChildItem -Path "C:\Users" | Where-Object { $_.Name -like "RDP*" } | Select-Object -First 1).FullName
 
-              # B. Sync User Files
               if (Test-Path "$workDir\User") {
                   $excludeFiles = @("NTUSER.DAT*", "ntuser.ini", "usrClass.dat*")
                   robocopy "$workDir\User" "$rdpPath" /E /XJ /R:0 /W:0 /MT:16 /NP /XF $excludeFiles
               }
 
-              # C. ONE-FILE STARTUP FIX (No separate PS1 file)
               $startupFolder = "$rdpPath\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup"
               if (!(Test-Path $startupFolder)) { New-Item $startupFolder -ItemType Directory -Force }
               
-              # We create a single .bat file that executes the PowerShell commands directly
+              # BAT FIX: Added winget source reset and improved pathing
               $batContent = @"
           @echo off
           echo 🚀 Restoring Environment...
+          echo 🛠 Resetting Winget Sources...
+          powershell -ExecutionPolicy Bypass -Command "winget source reset --force"
+          echo 📦 Importing Apps...
           powershell -ExecutionPolicy Bypass -Command "if (Test-Path '$workDir\user_settings.reg') { reg import '$workDir\user_settings.reg' }; if (Test-Path '$workDir\apps.json') { winget import --import-file '$workDir\apps.json' --accept-package-agreements --accept-source-agreements --ignore-unavailable }"
+          echo ✅ Done! Self-destructing...
           del "%~f0"
           "@
               $batContent | Out-File "$startupFolder\restore.bat" -Encoding ascii
@@ -161,7 +164,7 @@ jobs:
           $start = Get-Date
           while ($true) {
             $elapsed = (New-TimeSpan -Start $start -End (Get-Date)).TotalMinutes
-            if ($elapsed -ge 5) {
+            if ($elapsed -ge 330) {
               $stage = "D:\to_pack"
               if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
               New-Item $stage -ItemType Directory -Force
